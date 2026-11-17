@@ -150,10 +150,47 @@ class Backend(QObject):
     def newProject(self, name: str):
         self.project = Project.new(self.settings.workspace_path, name or "perso")
         self._remember_project()
-        if self.agent:
-            self.agent.reset()
+        self.agent = None
+        self.emit("project_changed")
         self.emit("state", state=self._state())
         self.emit("toast", text=f"Nouveau projet : {self.project.folder.name}")
+
+    @Slot(result=str)
+    def listProjects(self) -> str:
+        items = []
+        for folder in self.settings.workspace_path.iterdir():
+            if not folder.is_dir() or folder.name.startswith("."):
+                continue
+            info_file = folder / "etat.json"
+            info = json.loads(info_file.read_text()) if info_file.exists() else {}
+            done = sum(bool(info.get(k)) for k in ("mesh", "rig", "animations", "last_export"))
+            items.append({
+                "name": folder.name,
+                "folder": str(folder),
+                "modified": folder.stat().st_mtime,
+                "steps_done": done,
+                "current": bool(self.project and self.project.folder == folder),
+            })
+        items.sort(key=lambda p: p["modified"], reverse=True)
+        return json.dumps(items[:50], ensure_ascii=False)
+
+    @Slot(str)
+    def openProject(self, folder: str):
+        path = Path(folder)
+        if not path.is_dir() or not path.resolve().is_relative_to(self.settings.workspace_path.resolve()):
+            self.emit("toast", text="Projet introuvable.", level="error")
+            return
+        self.project = Project(path)
+        self._remember_project()
+        self.agent = None
+        if self.runner.bridge.is_alive() and self.project.blend.exists():
+            try:
+                self.runner.bridge.send("open_file", {"filepath": str(self.project.blend)})
+            except Exception as exc:  # Blender ouvert mais occupé : pas grave
+                self.log(f"Blender n'a pas pu ouvrir le projet : {exc}", "error")
+        self.emit("project_changed")
+        self.emit("state", state=self._state())
+        self.emit("toast", text=f"Projet ouvert : {path.name}")
 
     @Slot(str, result=str)
     def pickFile(self, kind: str) -> str:
@@ -232,7 +269,8 @@ class Backend(QObject):
     def exportModel(self, fmt: str):
         def work():
             project = self._ensure_project()
-            path = project.exports / f"{project.folder.name}.{fmt}"
+            safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in project.folder.name)
+            path = project.exports / f"{safe.strip('-') or 'perso'}.{fmt}"
             res = self._step("export", {"path": str(path), "fmt": fmt})
             self._save_info(last_export=res["path"])
             if fmt == "glb":
@@ -306,9 +344,14 @@ class Backend(QObject):
             def run_step(step, args):
                 return self._step(step, args)
 
-            self.agent = Agent(self.settings, on_event=lambda e: self.emit("agent", **e),
+            self.agent = Agent(self.settings, on_event=self._agent_event,
                                confirm=self._confirm, run_step=run_step, log_dir=project.folder)
         return self.agent
+
+    def _agent_event(self, event: dict):
+        # Les événements de l'agent ont leur propre « kind » (assistant, tool…) : on le
+        # range dans « sub » pour ne pas écraser le type de message envoyé à la page.
+        self.emit("agent", **{**{k: v for k, v in event.items() if k != "kind"}, "sub": event["kind"]})
 
     def _confirm(self, code: str, explanation: str) -> bool:
         cid = uuid.uuid4().hex
@@ -330,7 +373,7 @@ class Backend(QObject):
     @Slot(str)
     def chat(self, text: str):
         if not self.runner.bridge.is_alive():
-            self.emit("agent", kind="guard", text=(
+            self.emit("agent", sub="guard", text=(
                 "Blender n'est pas connecté. Clique sur « Ouvrir dans Blender » puis renvoie ta demande."))
             return
         agent = self._get_agent()

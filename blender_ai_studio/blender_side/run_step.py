@@ -25,6 +25,7 @@ def main():
         if job.get("preview"):
             bas_pipeline.step_export(job["preview"], "glb")
         if job.get("save_as"):
+            bpy.context.preferences.filepaths.save_version = 0  # pas de fichiers .blend1
             bpy.ops.wm.save_as_mainfile(filepath=job["save_as"])
         print(MARK + json.dumps({"ok": True, "result": result}), flush=True)
     except Exception as exc:

@@ -14,10 +14,13 @@ Une IA (Claude ou un modèle local) pilote Blender pour tout le reste, en langag
 | **2. Alléger** | Fusion des sommets en double, faces cassées, normales, réduction au nombre de faces voulu, pieds au sol, hauteur 1 m. |
 | **3. Squelette** | Auto-rig : hanches, colonne, tête, bras et jambes placés d'après la forme, puis poids automatiques (repli par proximité si le maillage IA n'est pas étanche). |
 | **4. Animer** | Respiration, marche dandinée, saut, coucou : animations procédurales en boucle, rangées en pistes NLA. |
-| **5. Exporter** | GLB (web, Godot, three.js) avec une page web prête à publier, FBX (Unity, Unreal), OBJ. |
+| **5. Exporter** | GLB (web, Godot, three.js) avec une page web prête à publier, FBX (Unity, Unreal : une « take » par animation), OBJ. |
 | **Assistant** | « Ajoute un chapeau de cowboy », « fais-lui une danse » : l'IA lit la scène et exécute du Python dans Blender, avec ta validation. |
 
 L'aperçu 3D (three.js) se met à jour après chaque étape et lit toutes les animations.
+Le bouton **Projets** en haut crée un nouveau personnage ou rouvre un ancien.
+
+![L'assistant demande ta validation avant d'exécuter du code](docs/assistant.png)
 
 ## Installation (Fedora, et la plupart des Linux)
 
@@ -96,7 +99,7 @@ Installer depuis le disque* → `bas_bridge.py`, puis panneau **AI Studio** (tou
 ## Où sont les fichiers
 
 ```
-~/BlenderAIStudio/<projet>/
+~/BlenderAIStudio/<nom du perso>/
   projet.blend        le fichier Blender
   apercu.glb          ce qu'affiche l'aperçu
   sources/            images et modèles d'origine
@@ -104,6 +107,21 @@ Installer depuis le disque* → `bas_bridge.py`, puis panneau **AI Studio** (tou
   decisions.jsonl     journal de l'assistant
 ~/.config/blender-ai-studio/config.json   réglages
 ```
+
+## Comment l'auto-rig trouve les os
+
+Le maillage est coupé en tranches horizontales (intersection des triangles avec un plan) :
+
+- **jambes** : en montant depuis le sol, tant que le centre est *dehors* (entre les jambes) ;
+  les hanches sont juste au-dessus de l'entrejambe ;
+- **cou** : un rétrécissement suivi d'une partie plus large (la tête) ; sinon 70 % de la hauteur ;
+- **bras** : les points les plus écartés entre hanches et épaules, s'ils dépassent nettement du tronc.
+
+Les tranches marchent même sur un maillage décimé (grandes faces sans sommet au milieu).
+Contrôle visuel sur trois cas (marche, saut, coucou) avec `tests/visual_check.py` :
+
+![Bonhomme en T-pose](docs/rig-humanoide.png)
+![Pingouin d'un seul bloc, pattes minuscules](docs/rig-pingouin.png)
 
 ## Limites connues
 
@@ -136,11 +154,13 @@ React (Cue, shadcn…) plus tard sans toucher au moteur Python.
 ```bash
 pip install bpy PySide6           # bpy = Blender en module Python
 python tests/test_pipeline_bpy.py # import → rig → 4 animations → export GLB vérifié
-python tests/test_bridge_agent.py # pont, pipeline en direct, agent et garde-fous (IA simulée)
+python tests/test_bridge_agent.py # pont, pipeline en direct, agent Claude/Ollama et garde-fous (IA simulée)
+python tests/visual_check.py /tmp/rendus penguin humanoid blob   # planches de rendu du rig
 ```
 
 `tests/fake_blender.py` imite la ligne de commande de Blender avec `bpy` pour tester l'appli
-complète sans Blender installé.
+complète sans Blender installé, et `tests/screenshot.py` pilote l'interface hors écran
+(scénario JS ou Python) pour en faire des captures.
 
 ## Dépannage
 
@@ -148,5 +168,9 @@ complète sans Blender installé.
 - **« Blender introuvable »** : Réglages → Programme Blender (`/usr/bin/blender`, ou
   `/var/lib/flatpak/exports/bin/org.blender.Blender` pour Flatpak).
 - **Port 9876 occupé** (add-on blender-mcp déjà actif) : change le port dans Réglages.
+- **Pas de détection du GPU NVIDIA sur Fedora** : installe le pilote propriétaire via RPM Fusion
+  (`akmod-nvidia`) ; `nvidia-smi` doit répondre.
+- **Sécurité** : le pont n'écoute que sur 127.0.0.1, mais tout programme local peut lui envoyer
+  du code (comme l'add-on blender-mcp). Ferme Blender quand tu ne t'en sers pas.
 
 Polices : Inter et Bricolage Grotesque (SIL OFL). three.js (MIT). Licences dans `ui/vendor/`.

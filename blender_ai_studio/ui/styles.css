@@ -251,7 +251,7 @@ input[type="range"] { width: 100%; accent-color: var(--render); }
 .msg.confirm { align-self: stretch; max-width: none; background: var(--panel); border: 1px solid var(--render); display: grid; gap: 8px; }
 .confirm-title { margin: 0; font-weight: 600; }
 .confirm-why { margin: 0; color: var(--muted); }
-.msg.confirm pre { margin: 0; max-height: 240px; overflow: auto; background: var(--bg); border-radius: var(--r-s); padding: 10px; font: 12px/1.45 var(--font-code); }
+.msg.confirm pre { margin: 0; max-height: 240px; overflow: auto; background: var(--bg); border-radius: var(--r-s); padding: 10px; font: 12px/1.45 var(--font-code); white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.confirm.answered .row { display: none; }
 
 .composer { border-top: 1px solid var(--line); padding: 12px; display: grid; gap: 8px; }
@@ -298,6 +298,22 @@ input[type="range"] { width: 100%; accent-color: var(--render); }
 .when { display: none; gap: 10px; }
 .when.on { display: grid; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ------------------------------------------------------------------ projets */
+.new-project { display: flex; gap: 8px; }
+.project-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; max-height: 50vh; overflow-y: auto; }
+.project-list button {
+  width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: baseline;
+  text-align: left; padding: 10px 12px; border-radius: var(--r-s); border: 1px solid transparent; background: none;
+}
+.project-list button:hover { background: var(--raised); }
+.project-list button[aria-current="true"] { border-color: var(--line); }
+.project-list .p-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-list .p-date { color: var(--muted); font-size: 12px; }
+.project-list .p-steps { grid-column: 1 / -1; display: flex; gap: 4px; }
+.project-list .p-steps i { width: 18px; height: 4px; border-radius: 2px; background: var(--line); }
+.project-list .p-steps i.on { background: var(--clay); }
+.project-empty { color: var(--muted); padding: 8px 2px; }
 
 /* ------------------------------------------------------------------ petits écrans */
 @media (max-width: 1180px) {

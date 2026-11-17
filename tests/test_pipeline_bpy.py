@@ -78,6 +78,15 @@ def main():
         return [tuple(round(c, 4) for c in v.co) for v in ev.data.vertices if v.co.z < 0.2][:50]
 
     assert low_points(0) != low_points(8), "les jambes ne bougent pas"
+
+    # FBX : chaque animation doit devenir une « take »
+    fbx = os.path.join(tmp, "out.fbx")
+    P.run_step("export", {"path": fbx, "fmt": "fbx"})
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.fbx(filepath=fbx)
+    takes = sorted(a.name.split("|")[-1] for a in bpy.data.actions)
+    print("takes FBX:", takes)
+    assert takes == ["Idle", "Jump", "Walk", "Wave"], takes
     print("OK — pipeline complet")
 
 

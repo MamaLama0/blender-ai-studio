@@ -95,6 +95,20 @@ def client_side(tmp):
         ])
         agent.ask("essaie")
         assert any("refusé" in e.get("text", "") for e in events), events
+
+        # 5. Même boucle avec Ollama (format OpenAI-like des appels d'outils)
+        events.clear()
+        settings.llm_provider = "ollama"
+        agent.reset()
+        it = iter([
+            {"message": {"role": "assistant", "content": "",
+                         "tool_calls": [{"function": {"name": "get_scene_info", "arguments": {}}}]}},
+            {"message": {"role": "assistant", "content": "Il y a un personnage et son squelette."}},
+        ])
+        agent._ollama_call = lambda: next(it)
+        agent.ask("Qu'y a-t-il dans la scène ?")
+        assert events[-1]["text"].startswith("Il y a"), events
+        assert any(e["kind"] == "tool_result" and "Character_Rig" in e["text"] for e in events)
         results["ok"] = True
     except Exception as exc:  # noqa: BLE001
         import traceback

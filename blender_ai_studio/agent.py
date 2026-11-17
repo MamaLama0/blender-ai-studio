@@ -128,10 +128,16 @@ class Agent:
 
     def ask(self, user_text: str) -> None:
         self.stop_requested = False
-        if self.settings.llm_provider == "claude":
-            self._loop_claude(user_text)
-        else:
-            self._loop_ollama(user_text)
+        snapshot = len(self.messages)
+        try:
+            if self.settings.llm_provider == "claude":
+                self._loop_claude(user_text)
+            else:
+                self._loop_ollama(user_text)
+        except Exception:
+            # On ne garde pas un historique à moitié écrit (appel d'outil sans résultat…)
+            del self.messages[snapshot:]
+            raise
 
     # ------------------------------------------------------------------
     def _log(self, **entry):
@@ -186,11 +192,14 @@ class Agent:
         key = self.settings.get_api_key()
         if not key:
             raise AgentError("Pas de clé API Claude. Ajoute-la dans Réglages.")
+        self._trim_images()
+        tools = [dict(t) for t in TOOLS]
+        tools[-1]["cache_control"] = {"type": "ephemeral"}  # outils + consignes mis en cache
         body = {
             "model": self.settings.claude_model,
             "max_tokens": 4096,
-            "system": SYSTEM_PROMPT,
-            "tools": TOOLS,
+            "system": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            "tools": tools,
             "messages": self.messages,
         }
         req = urllib.request.Request(
@@ -207,8 +216,32 @@ class Agent:
         except urllib.error.URLError as exc:
             raise AgentError(f"API Claude injoignable : {exc.reason}") from exc
 
+    def _trim_images(self):
+        """Ne garde que la dernière capture d'écran : les anciennes coûtent cher pour rien."""
+        seen_last = False
+        for msg in reversed(self.messages):
+            if msg["role"] != "user" or not isinstance(msg["content"], list):
+                continue
+            for block in msg["content"]:
+                if block.get("type") != "tool_result" or not isinstance(block.get("content"), list):
+                    continue
+                kept = []
+                for part in block["content"]:
+                    if part.get("type") == "image":
+                        if seen_last:
+                            kept.append({"type": "text", "text": "[ancienne capture retirée]"})
+                            continue
+                        seen_last = True
+                    kept.append(part)
+                block["content"] = kept
+
     def _loop_claude(self, user_text: str):
-        self.messages.append({"role": "user", "content": user_text})
+        last = self.messages[-1] if self.messages else None
+        if last and last["role"] == "user" and isinstance(last["content"], list):
+            # Une demande précédente s'est arrêtée juste après des résultats d'outils
+            last["content"].append({"type": "text", "text": user_text})
+        else:
+            self.messages.append({"role": "user", "content": user_text})
         errors: dict[str, int] = {}
         for step in range(self.settings.max_steps):
             if self.stop_requested:

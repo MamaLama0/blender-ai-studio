@@ -1,6 +1,7 @@
 """Ouvre l'interface hors écran, joue un scénario, et enregistre des captures.
 
-QT_QPA_PLATFORM=offscreen QTWEBENGINE_DISABLE_SANDBOX=1 python tests/screenshot.py OUT_DIR [script.js]
+SHOTS='nom:délai_ms:code JS;;nom2:délai:py code Python' \
+QT_QPA_PLATFORM=offscreen QTWEBENGINE_DISABLE_SANDBOX=1 python tests/screenshot.py OUT_DIR
 """
 import os
 import sys
@@ -13,7 +14,7 @@ from blender_ai_studio.app import build  # noqa: E402
 
 out_dir = sys.argv[1]
 os.makedirs(out_dir, exist_ok=True)
-steps = [s for s in os.environ.get("SHOTS", "accueil:3000").split(",") if s]
+steps = [s for s in os.environ.get("SHOTS", "accueil:3000").split(";;") if s]
 
 app, window, view, backend = build()
 window.resize(1440, 900)
@@ -29,7 +30,9 @@ def run(i=0):
         app.quit()
         return
     name, delay, *js = steps[i].split(":", 2)
-    if js:
+    if js and js[0].startswith("py "):
+        exec(js[0][3:], {"backend": backend, "view": view})   # scénario côté Python
+    elif js:
         view.page().runJavaScript(js[0])
 
     def shoot():
@@ -39,5 +42,5 @@ def run(i=0):
     QTimer.singleShot(int(delay), shoot)
 
 
-QTimer.singleShot(500, run)
+QTimer.singleShot(3000, run)  # laisse la page se connecter à Python
 app.exec()

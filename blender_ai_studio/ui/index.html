@@ -21,9 +21,9 @@
       <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="#mark"/></svg>
       <span>Blender AI Studio</span>
     </div>
-    <button class="project-pill" id="projectPill" title="Changer de projet">
+    <button class="project-pill" id="projectPill" title="Créer ou ouvrir un projet">
       <span class="project-name" id="projectName">Aucun projet</span>
-      <span class="project-new">Nouveau</span>
+      <span class="project-new">Projets</span>
     </button>
     <div class="topbar-right">
       <span class="status" id="gpuStatus" title=""></span>
@@ -255,6 +255,21 @@
       <div class="modal-actions">
         <button value="cancel" class="btn ghost">Annuler</button>
         <button value="save" class="btn primary" id="saveSettingsBtn">Enregistrer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Projets -->
+  <dialog class="modal projects" id="projectsDialog">
+    <form method="dialog" id="newProjectForm">
+      <h2>Projets</h2>
+      <div class="new-project">
+        <input name="name" placeholder="Nom du nouveau personnage, par ex. pingouin cowboy" aria-label="Nom du nouveau projet">
+        <button class="btn primary" value="create">Créer</button>
+      </div>
+      <ul class="project-list" id="projectList"></ul>
+      <div class="modal-actions">
+        <button value="cancel" class="btn ghost">Fermer</button>
       </div>
     </form>
   </dialog>

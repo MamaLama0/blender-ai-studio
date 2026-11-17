@@ -183,78 +183,148 @@ def _mesh_stats(obj):
 # --------------------------------------------------------------------------
 # 2. Auto-rig (heuristique, pensé pour les personnages type « toon » / bipèdes)
 # --------------------------------------------------------------------------
-def _analyze_shape(coords, slices=24):
-    xs = [c.x for c in coords]
-    zs = [c.z for c in coords]
-    zmin, zmax = min(zs), max(zs)
-    xmin, xmax = min(xs), max(xs)
-    height = zmax - zmin
-    width = xmax - xmin
-    cx = (xmin + xmax) / 2
-    cy = sum(c.y for c in coords) / len(coords)
-    step = height / slices
+class _Sections:
+    """Coupes horizontales du maillage (intersection triangles / plan z = cste).
 
-    bands = [[] for _ in range(slices)]
-    for c in coords:
-        idx = min(slices - 1, int((c.z - zmin) / step))
-        bands[idx].append(c)
+    Plus fiable que de compter les sommets : un maillage décimé a de grandes faces
+    sans sommet au milieu (jambes droites, flancs plats…).
+    """
 
-    half_widths, gaps = [], []
-    for band in bands:
-        if len(band) < 8:  # trop peu de sommets pour conclure (maillage peu dense)
-            half_widths.append(0.0)
-            gaps.append(None)
+    def __init__(self, obj):
+        import numpy as np
+
+        self.np = np
+        mesh = obj.data
+        mesh.calc_loop_triangles()
+        co = np.empty(len(mesh.vertices) * 3, dtype=np.float64)
+        mesh.vertices.foreach_get("co", co)
+        co = co.reshape(-1, 3)
+        mat = np.array(obj.matrix_world)
+        co = co @ mat[:3, :3].T + mat[:3, 3]
+        tri = np.empty(len(mesh.loop_triangles) * 3, dtype=np.int64)
+        mesh.loop_triangles.foreach_get("vertices", tri)
+        self.tris = co[tri.reshape(-1, 3)]          # (T, 3 sommets, xyz)
+        self.co = co
+        self.zmin, self.zmax = co[:, 2].min(), co[:, 2].max()
+        self.height = self.zmax - self.zmin
+        self.cx = (co[:, 0].min() + co[:, 0].max()) / 2
+
+    def segments(self, z):
+        np = self.np
+        pts = []
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            pa, pb = self.tris[:, a], self.tris[:, b]
+            da, db = pa[:, 2] - z, pb[:, 2] - z
+            cross = da * db < 0
+            t = np.where(cross, da / np.where(cross, da - db, 1), np.nan)
+            pts.append(pa[:, :2] + (pb[:, :2] - pa[:, :2]) * t[:, None])
+        pts = np.stack(pts, axis=1)                  # (T, 3, 2), NaN si pas de croisement
+        ok = ~np.isnan(pts[:, :, 0])
+        keep = ok.sum(axis=1) == 2
+        pts, ok = pts[keep], ok[keep]
+        order = np.argsort(~ok, axis=1, kind="stable")[:, :2]
+        return np.take_along_axis(pts, order[:, :, None], axis=1)  # (S, 2 points, xy)
+
+    def profile(self, frac):
+        """À la hauteur relative `frac` : centre dedans ?, demi-largeur du tronc, étendue."""
+        np = self.np
+        seg = self.segments(self.zmin + frac * self.height)
+        if len(seg) < 3:
+            return None
+        flat = seg.reshape(-1, 2)
+        cy = (flat[:, 1].min() + flat[:, 1].max()) / 2
+        p, q = seg[:, 0], seg[:, 1]
+        hits = (p[:, 1] - cy) * (q[:, 1] - cy) < 0
+        xs = p[hits, 0] + (cy - p[hits, 1]) * (q[hits, 0] - p[hits, 0]) / (q[hits, 1] - p[hits, 1])
+        right = np.sort(xs[xs > self.cx])
+        left = np.sort(xs[xs < self.cx])[::-1]
+        inside = len(right) % 2 == 1
+        if inside and len(right) and len(left):
+            torso = (right[0] - self.cx + self.cx - left[0]) / 2
+        else:
+            torso = 0.0
+        return {
+            "inside": inside,
+            "torso": torso,
+            "extent": float(np.abs(flat[:, 0] - self.cx).max()),
+            "left_x": float(flat[flat[:, 0] < self.cx, 0].mean()) if (flat[:, 0] < self.cx).any() else None,
+            "right_x": float(flat[flat[:, 0] > self.cx, 0].mean()) if (flat[:, 0] > self.cx).any() else None,
+            "cy": float(cy),
+        }
+
+
+def _analyze_shape(obj):
+    sec = _Sections(obj)
+    zmin, h, cx = sec.zmin, sec.height, sec.cx
+    co = sec.co
+
+    # Jambes : en montant depuis le sol, le centre est « dehors » (entre les jambes)
+    # jusqu'à l'entrejambe. Les hanches sont juste au-dessus.
+    fracs = [0.03 + i * 0.01 for i in range(48)]          # 3 % → 50 % de la hauteur
+    profiles = {f: sec.profile(f) for f in fracs}
+    last_gap = None
+    for f in fracs:
+        pr = profiles[f]
+        if pr is None:
             continue
-        dx = sorted(abs(c.x - cx) for c in band)
-        half_widths.append(dx[int(len(dx) * 0.95) - 1])
-        near_center = sum(1 for d in dx if d < width * 0.05)
-        gaps.append(near_center / len(dx) < 0.02)
-
-    # Jambes : bandes basses où le centre est vide (espace entre les jambes)
-    # → les hanches sont à la première bande « pleine » au-dessus de cet espace.
-    hip_band = 0
-    seen_gap = False
-    for i in range(int(slices * 0.5)):
-        if gaps[i] is None:
-            continue
-        if gaps[i]:
-            seen_gap = True
-            hip_band = i + 1
-        elif seen_gap:
-            hip_band = i
+        if not pr["inside"] and pr["left_x"] is not None and pr["right_x"] is not None:
+            last_gap = f
+        elif last_gap is not None and pr["inside"]:
             break
-    has_legs = hip_band > 0
-    hip_z = zmin + max(hip_band, int(slices * 0.12)) * step
+    has_legs = last_gap is not None and last_gap >= 0.05
+    hip_frac = (last_gap + 0.02) if has_legs else 0.12
+    hip_z = zmin + hip_frac * h
 
-    # Cou : bande la plus étroite dans la moitié haute (sinon 70 % de la hauteur)
-    upper = range(int(slices * 0.5), int(slices * 0.9))
-    neck_band = min(upper, key=lambda i: half_widths[i] or 1e9)
-    torso_ref = max(half_widths[int(slices * 0.3):int(slices * 0.6)] or [width / 2])
-    if half_widths[neck_band] > torso_ref * 0.85:
-        neck_z = zmin + height * 0.70
-    else:
-        neck_z = zmin + (neck_band + 0.5) * step
+    # Tronc : demi-largeur au milieu du corps (première paroi rencontrée depuis le centre,
+    # donc les bras écartés ne comptent pas)
+    torso_vals = sorted(p["torso"] for f in (0.35, 0.4, 0.45, 0.5, 0.55)
+                        if (p := sec.profile(max(f, hip_frac + 0.05))) and p["torso"] > 0)
+    torso_half = torso_vals[len(torso_vals) // 2] if torso_vals else float(abs(co[:, 0] - cx).max()) / 2
 
-    # Bras : point le plus écarté entre hanches et cou
-    side = {"L": None, "R": None}
-    for c in coords:
-        if hip_z < c.z < neck_z:
-            key = "L" if c.x > cx else "R"
-            if side[key] is None or abs(c.x - cx) > abs(side[key].x - cx):
-                side[key] = c
-    torso_half = sorted(half_widths[int(slices * 0.3):int(slices * 0.6)] or [width / 4])
-    torso_half = torso_half[len(torso_half) // 2]
+    # Cou : rétrécissement suivi d'une tête plus large au-dessus (sinon 70 % de la hauteur)
+    neck_frac = 0.70
+    widths = {}
+    for i in range(56, 93):
+        pr = sec.profile(i / 100)
+        widths[i] = pr["torso"] if pr and pr["torso"] > 0 else None
+    best = None
+    for i in range(58, 86):
+        w = widths.get(i)
+        above = [widths[j] for j in range(i + 2, i + 13) if widths.get(j)]
+        if not w or len(above) < 5:
+            continue
+        bulge = sum(above) / len(above) / w
+        if w < torso_half * 0.85 and bulge > 1.15 and (best is None or w < best[1]):
+            best = (i, w)
+    if best:
+        neck_frac = best[0] / 100
+    neck_z = zmin + neck_frac * h
 
-    feet_x = {}
-    bottom = [c for c in coords if c.z < zmin + height * 0.08]
+    # Bras : point le plus écarté entre les hanches et un peu au-dessus du cou
+    mask = (co[:, 2] > hip_z) & (co[:, 2] < neck_z + 0.05 * h)
+    hands = {"L": None, "R": None}
     for key, sign in (("L", 1), ("R", -1)):
-        pts = [c.x for c in bottom if (c.x - cx) * sign > 0]
-        feet_x[key] = sum(pts) / len(pts) if pts else cx + sign * width * 0.18
+        side = co[mask & ((co[:, 0] - cx) * sign > 0)]
+        if len(side):
+            far = side[abs(side[:, 0] - cx).argmax()]
+            if abs(far[0] - cx) > torso_half * 1.25:
+                hands[key] = Vector(far)
+
+    # Pieds : centre des parties gauche/droite tout en bas
+    bottom = sec.profile(0.03) or {}
+    feet_x = {
+        "L": bottom.get("right_x") if bottom.get("right_x") is not None else cx + torso_half * 0.5,
+        "R": bottom.get("left_x") if bottom.get("left_x") is not None else cx - torso_half * 0.5,
+    }
+    cy = bottom.get("cy", float(co[:, 1].mean())) if has_legs else float((co[:, 1].min() + co[:, 1].max()) / 2)
+    mid = sec.profile(0.5)
+    if mid:
+        cy = mid["cy"]
 
     return {
-        "zmin": zmin, "zmax": zmax, "height": height, "width": width,
-        "cx": cx, "cy": cy, "hip_z": hip_z, "neck_z": neck_z,
-        "has_legs": has_legs, "hands": side, "torso_half": torso_half, "feet_x": feet_x,
+        "zmin": zmin, "zmax": sec.zmax, "height": h, "cx": cx, "cy": cy,
+        "hip_z": hip_z, "neck_z": neck_z, "has_legs": has_legs, "hands": hands,
+        "torso_half": torso_half, "feet_x": feet_x,
     }
 
 
@@ -269,7 +339,7 @@ def step_rig():
     char.vertex_groups.clear()
     char.parent = None
 
-    s = _analyze_shape(_world_coords(char))
+    s = _analyze_shape(char)
     h, cx, cy = s["height"], s["cx"], s["cy"]
     hip_z, neck_z = s["hip_z"], s["neck_z"]
     spine_mid = hip_z + (neck_z - hip_z) * 0.5
@@ -303,11 +373,13 @@ def step_rig():
     for key, sign in (("L", 1), ("R", -1)):
         fx = s["feet_x"][key]
         leg_x = cx + (fx - cx) * 0.9
-        top = hip_z if s["has_legs"] else hip_z * 0.9
+        # Pivot de la jambe assez haut pour que le pied balance visiblement,
+        # même quand les pattes sont minuscules (pingouin, peluche…).
+        top = max(hip_z, s["zmin"] + h * 0.2)
         bone(f"leg.{key}", (leg_x, cy, top), (fx, cy, s["zmin"] + h * 0.03), "hips")
         hand = s["hands"][key]
         start_x = cx + sign * s["torso_half"] * 0.55
-        if hand is not None and abs(hand.x - cx) > s["torso_half"] * 0.9:
+        if hand is not None:
             tail = (hand.x, hand.y, hand.z)
         else:  # pas de bras visible : petit os latéral (ailerons, mains collées...)
             tail = (cx + sign * s["torso_half"] * 1.05, cy, shoulder_z - h * 0.12)
@@ -321,9 +393,9 @@ def step_rig():
     return {
         "bones": [b.name for b in rig.data.bones],
         "skinning": method,
-        "has_legs": s["has_legs"],
-        "hip_height": round(hip_z, 3),
-        "neck_height": round(neck_z, 3),
+        "has_legs": bool(s["has_legs"]),
+        "hip_height": round(float(hip_z), 3),
+        "neck_height": round(float(neck_z), 3),
     }
 
 
@@ -401,8 +473,9 @@ def _anim_idle(rig, h, intensity):
         _key(rig.pose.bones["hips"], f, loc=(0, math.sin(t) * 0.01 * h * intensity, 0))
         _key(rig.pose.bones["spine"], f, rot=(math.sin(t) * 0.04 * intensity, 0, 0))
         _key(rig.pose.bones["head"], f, rot=(0, 0, math.sin(t / 2 + 1) * 0.06 * intensity))
-        for side, sgn in (("L", 1), ("R", -1)):
-            _key(rig.pose.bones[f"arm.{side}"], f, rot=(sgn * math.sin(t) * 0.05 * intensity, 0, 0))
+        # Même signe des deux côtés = mouvement symétrique (les axes X locaux sont en miroir)
+        for side in ("L", "R"):
+            _key(rig.pose.bones[f"arm.{side}"], f, rot=(math.sin(t) * 0.05 * intensity, 0, 0))
     return n
 
 
@@ -413,8 +486,10 @@ def _anim_walk(rig, h, intensity):
     for f in range(0, n + 1, 2):
         t = 2 * math.pi * f / n
         s = math.sin(t)
-        _key(rig.pose.bones["leg.L"], f, rot=(s * swing, 0, 0))
-        _key(rig.pose.bones["leg.R"], f, rot=(-s * swing, 0, 0))
+        # Le pied qui avance se soulève (l'os pointe vers le bas : -Y local = vers le haut)
+        lift = 0.06 * h * intensity
+        _key(rig.pose.bones["leg.L"], f, rot=(s * swing, 0, 0), loc=(0, -max(0.0, s) * lift, 0))
+        _key(rig.pose.bones["leg.R"], f, rot=(-s * swing, 0, 0), loc=(0, -max(0.0, -s) * lift, 0))
         _key(rig.pose.bones["hips"], f,
              rot=(0, 0, s * 0.12 * intensity),
              loc=(0, abs(math.cos(t)) * 0.03 * h * intensity, 0))
@@ -432,7 +507,7 @@ def _anim_jump(rig, h, intensity):
             (23, -0.06, 0.5), (30, 0.0, 0.0)]
     for f, up, arms in keys:
         _key(hips, f, loc=(0, up * h * intensity, 0))
-        _key(rig.pose.bones["arm.L"], f, rot=(-arms * intensity, 0, 0))
+        _key(rig.pose.bones["arm.L"], f, rot=(arms * intensity, 0, 0))
         _key(rig.pose.bones["arm.R"], f, rot=(arms * intensity, 0, 0))
         tuck = max(0.0, up) * 1.2 * intensity
         _key(rig.pose.bones["leg.L"], f, rot=(tuck, 0, 0))
@@ -531,8 +606,10 @@ def step_export(path, fmt="glb"):
         except TypeError:
             bpy.ops.export_scene.gltf(**kwargs)
     elif fmt == "fbx":
+        # Chaque action devient une « take » FBX (Unity/Unreal les voient comme des clips)
         bpy.ops.export_scene.fbx(filepath=path, bake_anim=True, add_leaf_bones=False,
-                                 bake_anim_use_nla_strips=True, bake_anim_use_all_actions=False)
+                                 bake_anim_use_nla_strips=False, bake_anim_use_all_actions=True,
+                                 bake_anim_force_startend_keying=True)
     elif fmt == "obj":
         bpy.ops.wm.obj_export(filepath=path)
     else:

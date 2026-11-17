@@ -36,10 +36,12 @@ class Project:
 
     @classmethod
     def new(cls, workspace: Path, name: str | None = None) -> "Project":
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        slug = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in (name or "perso"))[:40]
-        folder = workspace / f"{slug}-{stamp}"
-        folder.mkdir(parents=True, exist_ok=True)
+        raw = (name or "").strip() or f"perso {time.strftime('%d-%m %Hh%M')}"
+        slug = "".join(ch if ch.isalnum() or ch in "-_ " else "-" for ch in raw).strip()[:48] or "perso"
+        folder, n = workspace / slug, 2
+        while folder.exists():
+            folder, n = workspace / f"{slug} ({n})", n + 1
+        folder.mkdir(parents=True)
         return cls(folder)
 
 
@@ -60,6 +62,14 @@ class PipelineRunner:
         return self._run_background(project, step, args)
 
     def _run_live(self, project: Project, step: str, args: dict) -> dict:
+        # Le Blender ouvert doit travailler sur CE projet, pas sur le précédent.
+        if step != "import" and project.blend.exists():
+            try:
+                current = self.bridge.send("get_scene_info").get("file", "")
+                if Path(current or "/").resolve() != project.blend.resolve():
+                    self.bridge.send("open_file", {"filepath": str(project.blend)})
+            except BridgeError as exc:
+                raise StepError(str(exc)) from exc
         code = f"""
 import sys, json, importlib
 sys.path.insert(0, {str(BLENDER_SIDE)!r})
@@ -67,6 +77,7 @@ import bas_pipeline
 importlib.reload(bas_pipeline)
 _r = bas_pipeline.run_step({step!r}, json.loads({json.dumps(args)!r}))
 bas_pipeline.step_export({str(project.preview)!r}, "glb")
+bpy.context.preferences.filepaths.save_version = 0
 bpy.ops.wm.save_as_mainfile(filepath={str(project.blend)!r})
 print({MARK!r} + json.dumps(_r))
 """

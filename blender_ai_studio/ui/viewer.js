@@ -114,6 +114,15 @@ export class Viewer {
     return names;
   }
 
+  clear() {
+    if (this.model) this.scene.remove(this.model);
+    this.model = null;
+    this.mixer = null;
+    this.actions = {};
+    this.current = null;
+    this._framed = false;
+  }
+
   play(name) {
     const next = this.actions[name];
     if (!next) return;

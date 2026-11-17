@@ -39,6 +39,7 @@ function handle(ev) {
     case "agent": agentEvent(ev); break;
     case "confirm": showConfirm(ev); break;
     case "exported": addLog(`Fichier exporté : ${ev.path}`); break;
+    case "project_changed": resetWorkspaceView(); break;
   }
 }
 
@@ -211,10 +212,46 @@ $("#folderBtn").onclick = () => backend.openFolder();
 
 // Haut de page
 $("#openBlenderBtn").onclick = () => backend.openBlender();
-$("#projectPill").onclick = () => {
-  const name = prompt("Nom du nouveau projet", "perso");
-  if (name !== null) { lastPreview = null; viewer._framed = false; backend.newProject(name); }
+// ------------------------------------------------------------------ projets
+const projDlg = $("#projectsDialog");
+$("#projectPill").onclick = async () => {
+  const list = JSON.parse(await call("listProjects"));
+  const ul = $("#projectList");
+  ul.innerHTML = "";
+  if (!list.length) ul.innerHTML = '<li class="project-empty">Aucun projet pour l\'instant.</li>';
+  for (const p of list) {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("aria-current", String(p.current));
+    const date = new Date(p.modified * 1000).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" });
+    b.innerHTML = `<span class="p-name"></span><span class="p-date">${date}</span>
+      <span class="p-steps" title="${p.steps_done} étape(s) sur 4">${[0, 1, 2, 3].map((i) => `<i class="${i < p.steps_done ? "on" : ""}"></i>`).join("")}</span>`;
+    $(".p-name", b).textContent = p.name;
+    b.onclick = () => { projDlg.close(); backend.openProject(p.folder); };
+    li.append(b);
+    ul.append(li);
+  }
+  $("#newProjectForm").elements.name.value = "";
+  projDlg.showModal();
 };
+$("#newProjectForm").addEventListener("submit", (e) => {
+  if (e.submitter?.value !== "create") return;
+  backend.newProject($("#newProjectForm").elements.name.value.trim());
+});
+
+function resetWorkspaceView() {
+  lastPreview = null;
+  viewer.clear?.();
+  $("#stage").classList.remove("has-model");
+  $("#clips").hidden = true;
+  imagePath = "";
+  $("#imageThumb").hidden = true;
+  drop.classList.remove("has-image");
+  $("#promptText").value = "";
+  clearChat();
+  openStep("create");
+}
 
 // ------------------------------------------------------------------ glisser-déposer
 const stage = $("#stage");
@@ -239,6 +276,12 @@ for (const target of [stage, drop]) {
 
 // ------------------------------------------------------------------ assistant
 const messages = $("#messages");
+const chatEmptyHTML = messages.innerHTML;
+const clearChat = () => (messages.innerHTML = chatEmptyHTML);
+messages.addEventListener("click", (e) => {
+  const b = e.target.closest(".suggest");
+  if (b) { $("#chatInput").value = b.textContent; $("#chatInput").focus(); }
+});
 
 function addMsg(cls, text) {
   $("#chatEmpty")?.remove();
@@ -260,9 +303,9 @@ const TOOL_LABELS = {
 let lastTool = null;
 
 function agentEvent(ev) {
-  if (ev.kind === "assistant") addMsg("assistant", ev.text);
-  else if (ev.kind === "guard") addMsg("guard", ev.text);
-  else if (ev.kind === "tool") {
+  if (ev.sub === "assistant") addMsg("assistant", ev.text);
+  else if (ev.sub === "guard") addMsg("guard", ev.text);
+  else if (ev.sub === "tool") {
     lastTool = addMsg("tool", "");
     const detail = ev.input?.explanation || (ev.input?.step ? `étape ${ev.input.step}` : ev.input?.name || "");
     lastTool.innerHTML = "";
@@ -271,7 +314,7 @@ function agentEvent(ev) {
     s.textContent = `${TOOL_LABELS[ev.name] || ev.name}${detail ? " : " + detail : ""}`;
     d.append(s);
     lastTool.append(d);
-  } else if (ev.kind === "tool_result" && lastTool) {
+  } else if (ev.sub === "tool_result" && lastTool) {
     lastTool.classList.add(ev.error ? "err" : "ok");
     const pre = document.createElement("pre");
     pre.textContent = ev.text;
@@ -309,10 +352,9 @@ $("#composer").onsubmit = (e) => {
 $("#chatInput").onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); }
 };
-$$(".suggest").forEach((b) => (b.onclick = () => { $("#chatInput").value = b.textContent; $("#chatInput").focus(); }));
 $("#stopBtn").onclick = () => backend.stopAgent();
 $("#resetChatBtn").onclick = () => {
-  messages.innerHTML = "";
+  clearChat();
   backend.resetChat();
 };
 

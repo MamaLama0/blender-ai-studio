@@ -37,6 +37,9 @@ def generate(settings: Settings, out_path: Path, image: str | None = None, text:
     if not image and not text:
         raise GenerationError("Donne une image ou une description.")
     if settings.generator == "hunyuan_local":
+        if not image:
+            raise GenerationError("Hunyuan3D part d'une image (son texte → 3D est désactivé par défaut). "
+                                  "Ajoute une image, ou choisis TRELLIS pour partir d'un texte.")
         return _hunyuan(settings, out_path, image, text, log)
     if settings.generator == "trellis":
         if not Path(settings.trellis_python).expanduser().exists():

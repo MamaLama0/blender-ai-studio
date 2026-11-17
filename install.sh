@@ -67,7 +67,7 @@ Keywords=blender;3d;ia;rig;animation;
 StartupWMClass=blender-ai-studio
 EOF
 command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" || true
-command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q "$(dirname "$(dirname "$ICONS")")" || true
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q "$(dirname "$(dirname "$ICONS")")" 2>/dev/null || true
 
 say "Installé. Lance « Blender AI Studio » depuis le menu, ou : $APP"
 case ":$PATH:" in *":$BIN:"*) ;; *) say "Ajoute $BIN à ton PATH pour lancer depuis le terminal." ;; esac
