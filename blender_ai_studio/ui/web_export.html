@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mon personnage 3D</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #16181d; color: #ece8e1; font-family: system-ui, sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; }
+    nav { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px;
+          background: rgb(29 32 39 / .85); border: 1px solid #333845; border-radius: 999px; padding: 5px; }
+    nav button { background: none; border: 0; color: #979ba6; padding: 7px 14px; border-radius: 999px; cursor: pointer; font: inherit; }
+    nav button[aria-pressed="true"] { background: #262a33; color: #ece8e1; }
+  </style>
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <nav id="clips"></nav>
+  <script type="module">
+    // Généré par Blender AI Studio. Ouvre ce dossier avec un serveur web
+    // (ex. `python3 -m http.server`) : les navigateurs bloquent les .glb en file://.
+    import * as THREE from "three";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const canvas = document.getElementById("c");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x16181d);
+    const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
+    camera.position.set(1.5, 1.05, 2.3);
+    const controls = new OrbitControls(camera, canvas);
+    controls.target.set(0, 0.5, 0);
+    controls.enableDamping = true;
+    scene.add(new THREE.HemisphereLight(0xdfe7ff, 0x2a2622, 1.1));
+    const key = new THREE.DirectionalLight(0xfff1e0, 2.4);
+    key.position.set(2.5, 4, 3);
+    scene.add(key);
+
+    const timer = new THREE.Timer();
+    let mixer;
+    const gltf = await new GLTFLoader().loadAsync("{{MODEL}}");
+    scene.add(gltf.scene);
+    mixer = new THREE.AnimationMixer(gltf.scene);
+    const nav = document.getElementById("clips");
+    let current;
+    for (const clip of gltf.animations) {
+      const action = mixer.clipAction(clip);
+      const b = document.createElement("button");
+      b.textContent = clip.name;
+      b.onclick = () => {
+        current?.fadeOut(0.25);
+        action.reset().fadeIn(0.25).play();
+        current = action;
+        nav.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+      };
+      nav.append(b);
+    }
+    nav.querySelector("button")?.click();
+    if (!gltf.animations.length) nav.remove();
+
+    function resize() {
+      renderer.setSize(innerWidth, innerHeight, false);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+    }
+    addEventListener("resize", resize);
+    resize();
+    renderer.setAnimationLoop(() => {
+      timer.update();
+      mixer?.update(timer.getDelta());
+      controls.update();
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>

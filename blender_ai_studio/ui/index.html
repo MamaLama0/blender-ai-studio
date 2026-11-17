@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blender AI Studio</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="importmap">
+    { "imports": {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/addons/"
+    } }
+  </script>
+  <script src="qwebchannel.js"></script>
+</head>
+<body>
+  <div class="progress" id="progress" hidden><span></span></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="#mark"/></svg>
+      <span>Blender AI Studio</span>
+    </div>
+    <button class="project-pill" id="projectPill" title="Changer de projet">
+      <span class="project-name" id="projectName">Aucun projet</span>
+      <span class="project-new">Nouveau</span>
+    </button>
+    <div class="topbar-right">
+      <span class="status" id="gpuStatus" title=""></span>
+      <span class="status" id="blenderStatus"><i class="dot"></i><span>Blender</span></span>
+      <button class="icon-btn" id="settingsBtn" aria-label="Réglages" title="Réglages">
+        <svg viewBox="0 0 24 24"><use href="#i-gear"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Étapes du pipeline : une vraie séquence, d'où la numérotation -->
+    <aside class="rail" aria-label="Étapes">
+      <ol class="steps" id="steps">
+        <li class="step" data-step="create">
+          <button class="step-head" aria-expanded="true">
+            <span class="step-num">1</span>
+            <span class="step-title">Créer le modèle</span>
+            <span class="step-state"></span>
+          </button>
+          <div class="step-body">
+            <label class="drop" id="imageDrop" tabindex="0">
+              <img id="imageThumb" alt="" hidden>
+              <span class="drop-text" id="imageDropText">Dépose une image de ton personnage<br><small>ou clique pour la choisir</small></span>
+            </label>
+            <textarea id="promptText" rows="3" placeholder="…ou décris-le : un pingouin bleu avec un chapeau de cowboy et une moustache"></textarea>
+            <p class="hint" id="engineHint"></p>
+            <div class="row">
+              <button class="btn primary" id="generateBtn">Générer le modèle 3D</button>
+            </div>
+            <button class="btn ghost full" id="importBtn">Importer un fichier 3D existant</button>
+          </div>
+        </li>
+
+        <li class="step" data-step="clean">
+          <button class="step-head" aria-expanded="false">
+            <span class="step-num">2</span>
+            <span class="step-title">Alléger le maillage</span>
+            <span class="step-state"></span>
+          </button>
+          <div class="step-body">
+            <p class="stat" id="meshStat">Le modèle est nettoyé à l'import : sommets en double, faces cassées, normales, mise à l'échelle.</p>
+            <label class="field">
+              <span>Nombre de faces visé <output id="facesOut">20 000</output></span>
+              <input type="range" id="facesRange" min="2000" max="80000" step="1000" value="20000">
+            </label>
+            <button class="btn" id="reimportBtn">Ré-importer avec ce réglage</button>
+          </div>
+        </li>
+
+        <li class="step" data-step="rig">
+          <button class="step-head" aria-expanded="false">
+            <span class="step-num">3</span>
+            <span class="step-title">Poser le squelette</span>
+            <span class="step-state"></span>
+          </button>
+          <div class="step-body">
+            <p class="hint">Hanches, colonne, tête, bras et jambes sont placés d'après la forme du personnage, puis le maillage est lié aux os.</p>
+            <button class="btn primary" id="rigBtn">Rigger automatiquement</button>
+            <p class="stat" id="rigStat"></p>
+          </div>
+        </li>
+
+        <li class="step" data-step="animate">
+          <button class="step-head" aria-expanded="false">
+            <span class="step-num">4</span>
+            <span class="step-title">Animer</span>
+            <span class="step-state"></span>
+          </button>
+          <div class="step-body">
+            <fieldset class="chips" id="animChoice">
+              <legend>Animations à créer</legend>
+              <label><input type="checkbox" value="idle" checked><span>Respiration</span></label>
+              <label><input type="checkbox" value="walk" checked><span>Marche</span></label>
+              <label><input type="checkbox" value="jump"><span>Saut</span></label>
+              <label><input type="checkbox" value="wave"><span>Coucou</span></label>
+            </fieldset>
+            <label class="field">
+              <span>Amplitude <output id="intensityOut">100 %</output></span>
+              <input type="range" id="intensityRange" min="30" max="180" step="10" value="100">
+            </label>
+            <button class="btn primary" id="animateBtn">Créer les animations</button>
+          </div>
+        </li>
+
+        <li class="step" data-step="export">
+          <button class="step-head" aria-expanded="false">
+            <span class="step-num">5</span>
+            <span class="step-title">Exporter</span>
+            <span class="step-state"></span>
+          </button>
+          <div class="step-body">
+            <div class="export-grid">
+              <button class="export" data-fmt="glb"><b>GLB</b><span>Web, three.js, Godot</span></button>
+              <button class="export" data-fmt="fbx"><b>FBX</b><span>Unity, Unreal</span></button>
+              <button class="export" data-fmt="obj"><b>OBJ</b><span>Impression, sans animation</span></button>
+            </div>
+            <p class="hint">L'export GLB crée aussi une page web prête à mettre en ligne.</p>
+            <button class="btn ghost full" id="folderBtn">Ouvrir le dossier du projet</button>
+          </div>
+        </li>
+      </ol>
+    </aside>
+
+    <!-- Vue 3D -->
+    <section class="stage" id="stage" aria-label="Aperçu 3D">
+      <canvas id="viewport"></canvas>
+      <div class="stage-empty" id="stageEmpty">
+        <svg viewBox="0 0 120 120" aria-hidden="true"><use href="#turntable"/></svg>
+        <h1>Ton personnage apparaîtra ici</h1>
+        <p>Commence par une image ou une description à gauche, ou glisse un fichier .glb, .fbx ou .obj sur cette zone.</p>
+      </div>
+      <div class="stage-top">
+        <button class="btn blender" id="openBlenderBtn">
+          <svg viewBox="0 0 24 24"><use href="#i-blender"/></svg>Ouvrir dans Blender
+        </button>
+      </div>
+      <div class="clips" id="clips" hidden>
+        <button class="clip-play" id="playBtn" aria-label="Pause"><svg viewBox="0 0 24 24"><use href="#i-pause"/></svg></button>
+        <div class="clip-list" id="clipList"></div>
+      </div>
+      <div class="drop-veil" id="dropVeil" hidden><span>Lâche le fichier pour l'importer</span></div>
+    </section>
+
+    <!-- Assistant -->
+    <aside class="chat" aria-label="Assistant Blender">
+      <header class="chat-head">
+        <div>
+          <h2>Assistant</h2>
+          <p id="providerLabel">—</p>
+        </div>
+        <button class="icon-btn" id="resetChatBtn" title="Effacer la conversation" aria-label="Effacer la conversation">
+          <svg viewBox="0 0 24 24"><use href="#i-erase"/></svg>
+        </button>
+      </header>
+      <div class="messages" id="messages" aria-live="polite">
+        <div class="chat-empty" id="chatEmpty">
+          <p>Demande ce que tu veux, l'IA le fait dans Blender. Par exemple :</p>
+          <button class="suggest">Donne-lui un matériau d'argile mat, couleur bleu canard</button>
+          <button class="suggest">Ajoute un petit chapeau de cowboy marron sur sa tête</button>
+          <button class="suggest">Crée une animation de danse de 2 secondes</button>
+        </div>
+      </div>
+      <form class="composer" id="composer">
+        <textarea id="chatInput" rows="2" placeholder="Écris ta demande…" aria-label="Message"></textarea>
+        <div class="composer-actions">
+          <button type="button" class="btn ghost small" id="stopBtn" hidden>Arrêter</button>
+          <button type="submit" class="btn primary small" id="sendBtn">Envoyer</button>
+        </div>
+      </form>
+    </aside>
+  </main>
+
+  <footer class="journal" id="journal">
+    <button class="journal-line" id="journalToggle" aria-expanded="false">
+      <span id="journalLast">Prêt.</span>
+    </button>
+    <ol class="journal-list" id="journalList"></ol>
+  </footer>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <!-- Réglages -->
+  <dialog class="modal" id="settingsDialog">
+    <form method="dialog" id="settingsForm">
+      <h2>Réglages</h2>
+
+      <section>
+        <h3>IA qui pilote Blender</h3>
+        <div class="seg" role="radiogroup">
+          <label><input type="radio" name="llm_provider" value="claude"><span>Claude (en ligne)</span></label>
+          <label><input type="radio" name="llm_provider" value="ollama"><span>Ollama (local)</span></label>
+        </div>
+        <div class="when" data-when="llm_provider=claude">
+          <label class="field"><span>Clé API Anthropic <small id="keyState"></small></span>
+            <input type="password" name="api_key" autocomplete="off" placeholder="sk-ant-…"></label>
+          <label class="field"><span>Modèle</span>
+            <select name="claude_model">
+              <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (conseillé)</option>
+              <option value="claude-opus-5-5">Claude Opus 5.5 (le plus fort)</option>
+              <option value="claude-haiku-5-5">Claude Haiku 5.5 (rapide, économique)</option>
+            </select></label>
+        </div>
+        <div class="when" data-when="llm_provider=ollama">
+          <label class="field"><span>Adresse d'Ollama</span><input name="ollama_url"></label>
+          <label class="field"><span>Modèle (doit savoir utiliser des outils)</span><input name="ollama_model"></label>
+        </div>
+        <label class="check"><input type="checkbox" name="confirm_code"><span>Me demander avant d'exécuter du code dans Blender</span></label>
+        <div class="two">
+          <label class="field"><span>Actions max par demande</span><input type="number" name="max_steps" min="1" max="50"></label>
+          <label class="field"><span>Même erreur avant arrêt</span><input type="number" name="max_same_error" min="1" max="5"></label>
+        </div>
+      </section>
+
+      <section>
+        <h3>Génération 3D</h3>
+        <p class="hint" id="gpuAdvice"></p>
+        <label class="field"><span>Moteur</span>
+          <select name="generator">
+            <option value="trellis">TRELLIS de Microsoft, licence MIT (GPU NVIDIA 16 Go)</option>
+            <option value="hunyuan_local">Hunyuan3D-2 en serveur local (licence hors UE)</option>
+            <option value="custom_command">Ma propre commande</option>
+            <option value="import_only">Aucun, j'importe mes modèles</option>
+          </select></label>
+        <div class="when" data-when="generator=trellis">
+          <label class="field"><span>Dossier de TRELLIS</span><input name="trellis_repo"></label>
+          <label class="field"><span>Python de l'environnement TRELLIS</span><input name="trellis_python"></label>
+        </div>
+        <div class="when" data-when="generator=hunyuan_local">
+          <p class="hint warn">La licence de Hunyuan3D exclut l'Union européenne, le Royaume-Uni et la Corée du Sud.</p>
+          <label class="field"><span>Adresse du serveur</span><input name="hunyuan_url"></label>
+          <label class="check"><input type="checkbox" name="hunyuan_texture"><span>Générer aussi la texture</span></label>
+        </div>
+        <div class="when" data-when="generator=custom_command">
+          <label class="field"><span>Commande ({image}, {text}, {output})</span><input name="custom_command" placeholder="python gen.py --image {image} --out {output}"></label>
+        </div>
+      </section>
+
+      <section>
+        <h3>Blender et fichiers</h3>
+        <label class="field"><span>Programme Blender</span><input name="blender_path"></label>
+        <div class="two">
+          <label class="field"><span>Port du pont</span><input type="number" name="bridge_port"></label>
+          <label class="field"><span>Faces par défaut</span><input type="number" name="target_faces" step="1000"></label>
+        </div>
+        <label class="field"><span>Dossier des projets (redémarrer après changement)</span><input name="workspace"></label>
+      </section>
+
+      <div class="modal-actions">
+        <button value="cancel" class="btn ghost">Annuler</button>
+        <button value="save" class="btn primary" id="saveSettingsBtn">Enregistrer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Validation du code -->
+  <template id="confirmTpl">
+    <div class="msg confirm">
+      <p class="confirm-title">L'IA veut exécuter ce code dans Blender</p>
+      <p class="confirm-why"></p>
+      <pre><code></code></pre>
+      <div class="row">
+        <button class="btn ghost small" data-answer="no">Refuser</button>
+        <button class="btn primary small" data-answer="yes">Exécuter</button>
+      </div>
+    </div>
+  </template>
+
+  <!-- Icônes -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="mark" viewBox="0 0 32 32">
+      <ellipse cx="16" cy="25" rx="12" ry="4" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M16 4c-5 0-8 4-8 9.5S11 22 16 22s8-3 8-8.5S21 4 16 4z" fill="currentColor"/>
+      <circle cx="13" cy="11.5" r="1.6" fill="#16181d"/><circle cx="19" cy="11.5" r="1.6" fill="#16181d"/>
+    </symbol>
+    <symbol id="turntable" viewBox="0 0 120 120">
+      <ellipse cx="60" cy="92" rx="46" ry="12" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 6"/>
+      <path d="M60 22c-15 0-24 12-24 28s9 32 24 32 24-16 24-32-9-28-24-28z" fill="none" stroke="currentColor" stroke-width="2"/>
+      <circle cx="52" cy="46" r="3" fill="currentColor"/><circle cx="68" cy="46" r="3" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM19.4 13.5l1.6 1.2-2 3.4-1.9-.7a7.5 7.5 0 0 1-1.7 1l-.3 2h-4l-.3-2a7.5 7.5 0 0 1-1.7-1l-1.9.7-2-3.4 1.6-1.2a7.6 7.6 0 0 1 0-2L3 10.3l2-3.4 1.9.7a7.5 7.5 0 0 1 1.7-1l.3-2h4l.3 2a7.5 7.5 0 0 1 1.7 1l1.9-.7 2 3.4-1.6 1.2a7.6 7.6 0 0 1 0 2z"/></symbol>
+    <symbol id="i-blender" viewBox="0 0 24 24"><circle cx="14" cy="13" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="14" cy="13" r="2.2" fill="currentColor"/><path d="M3 9h7M6 5l6 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" fill="currentColor"/></symbol>
+    <symbol id="i-erase" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+  </svg>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
