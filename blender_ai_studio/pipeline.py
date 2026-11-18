@@ -49,10 +49,25 @@ class StepError(RuntimeError):
     pass
 
 
+class Cancelled(StepError):
+    """La personne a cliqué sur Annuler."""
+
+
 class PipelineRunner:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.bridge = BlenderBridge(settings.bridge_host, settings.bridge_port)
+        self._proc: subprocess.Popen | None = None
+        self._cancelled = False
+
+    def cancel(self) -> bool:
+        """Arrête le Blender d'arrière-plan en cours. Renvoie False si rien à arrêter."""
+        proc = self._proc
+        if proc and proc.poll() is None:
+            self._cancelled = True
+            proc.kill()
+            return True
+        return False
 
     # ------------------------------------------------------------------
     def run(self, project: Project, step: str, args: dict | None = None) -> dict:
@@ -99,23 +114,46 @@ print({MARK!r} + json.dumps(_r))
             cmd.append(str(project.blend))
         cmd += ["--python", str(BLENDER_SIDE / "run_step.py"),
                 "--", json.dumps(job)]
+        self._cancelled = False
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
-                                  env={**os.environ, "PYTHONNOUSERSITE": "1"})
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                          env={**os.environ, "PYTHONNOUSERSITE": "1"})
+            stdout, stderr = self._proc.communicate(timeout=1800)
         except FileNotFoundError as exc:
             raise StepError(f"Blender introuvable ({blender}). Règle le chemin dans Réglages.") from exc
         except subprocess.TimeoutExpired as exc:
+            self._proc.kill()
             raise StepError("Blender a mis plus de 30 min, étape abandonnée.") from exc
-        for line in proc.stdout.splitlines():
+        finally:
+            self._proc = None
+        if self._cancelled:
+            raise Cancelled("Étape annulée.")
+        for line in stdout.splitlines():
             if line.startswith(MARK):
                 data = json.loads(line[len(MARK):])
                 if not data["ok"]:
                     raise StepError(data["error"])
                 return {"result": data["result"], "mode": "Blender en arrière-plan"}
-        tail = (proc.stderr or proc.stdout)[-1500:]
+        tail = (stderr or stdout)[-1500:]
         raise StepError(f"Blender s'est arrêté sans résultat :\n{tail}")
 
     # ------------------------------------------------------------------
+    def check_blender(self, path: str | None = None) -> str:
+        """Lance Blender sans interface et renvoie sa version (lève StepError sinon)."""
+        exe = path or self.settings.blender_path
+        try:
+            out = subprocess.run([exe, "-b", "--factory-startup", "--python-expr",
+                                  "import bpy; print('__BAS_VERSION__', bpy.app.version_string)"],
+                                 capture_output=True, text=True, timeout=90)
+        except FileNotFoundError as exc:
+            raise StepError(f"Rien à cet emplacement : {exe}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise StepError("Blender ne répond pas (plus de 90 s).") from exc
+        for line in out.stdout.splitlines():
+            if line.startswith("__BAS_VERSION__"):
+                return line.split(" ", 1)[1].strip()
+        raise StepError("Ce programme ne s'est pas comporté comme Blender.")
+
     def open_in_blender(self, project: Project | None) -> subprocess.Popen:
         """Lance Blender avec le pont actif (et le projet s'il existe)."""
         cmd = [self.settings.blender_path]

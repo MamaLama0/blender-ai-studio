@@ -73,6 +73,12 @@ def client_side(tmp):
         assert any(e["kind"] == "tool_result" and "materiaux: 1" in e["text"] for e in events), events
         assert kinds[-1] == "assistant" and events[-1]["text"] == "C'est fait."
 
+        # 2b. La conversation survit à un redémarrage de l'appli
+        again = Agent(settings, on_event=lambda e: None, confirm=lambda c, w: True,
+                      run_step=lambda s, a: {}, log_dir=Path(tmp))
+        assert len(again.messages) == len(agent.messages) > 0, (len(again.messages), len(agent.messages))
+        assert again.messages[0]["role"] == "user"
+
         # 3. Garde-fou : la même erreur deux fois → arrêt
         events.clear()
         bad = {"code": "bpy.data.objects['Fantome'].location.x = 1", "explanation": "x"}

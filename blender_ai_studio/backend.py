@@ -6,6 +6,7 @@ par le signal `event` (JSON).
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import shutil
 import subprocess
@@ -21,9 +22,9 @@ from PySide6.QtWidgets import QFileDialog
 from . import generators
 from .agent import Agent, AgentError
 from .bridge import BlenderBridge
-from .config import Settings
+from .config import CONFIG_DIR, Settings
 from .hardware import detect_gpu
-from .pipeline import PipelineRunner, Project, StepError
+from .pipeline import Cancelled, PipelineRunner, Project, StepError
 
 MODEL_FILTER = "Modèles 3D (*.glb *.gltf *.obj *.fbx *.stl *.ply)"
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp)"
@@ -42,6 +43,8 @@ class Backend(QObject):
         self.runner = PipelineRunner(settings)
         self.project: Project | None = None
         self.busy = False
+        self.cancel_event = threading.Event()
+        self._job_started = time.time()
         self._confirm_waits: dict[str, tuple[threading.Event, dict]] = {}
         self.agent: Agent | None = None
         self._post.connect(self.event.emit)  # renvoie les événements des threads vers l'UI
@@ -57,22 +60,50 @@ class Backend(QObject):
     def log(self, text: str, level: str = "info"):
         self.emit("log", text=text, level=level)
 
+    def toast(self, text: str, level: str = "info", action: str | None = None):
+        """action : « settings », « folder », « blender » → bouton dans la notification."""
+        self.emit("toast", text=text, level=level, action=action)
+
+    def _progress(self, label: str):
+        self.emit("busy", on=True, label=label, started=self._job_started)
+
+    def _check_cancel(self):
+        if self.cancel_event.is_set():
+            raise Cancelled("Annulé.")
+
     def _job(self, label: str, fn, *args):
         if self.busy:
-            self.emit("toast", text="Une tâche est déjà en cours. Attends qu'elle se termine.", level="warn")
+            self.toast("Une tâche est déjà en cours. Attends qu'elle se termine ou annule-la.", "warn")
             return
         self.busy = True
-        self.emit("busy", on=True, label=label)
+        self.cancel_event = threading.Event()
+        self._job_started = time.time()
+        self._progress(label)
 
         def work():
             try:
                 fn(*args)
+            except Cancelled:
+                self.log("Tâche annulée.")
+                self.toast("Tâche annulée.")
             except (StepError, generators.GenerationError, AgentError, ValueError) as exc:
-                self.log(str(exc), "error")
-                self.emit("toast", text=str(exc).splitlines()[0], level="error")
+                if self.cancel_event.is_set():  # l'erreur vient de l'arrêt demandé
+                    self.log("Tâche annulée.")
+                    self.toast("Tâche annulée.")
+                    return
+                message = str(exc)
+                self.log(message, "error")
+                low = message.lower()
+                action = None
+                if ("réglages" in low or "clé api" in low
+                        or ("introuvable" in low and not low.startswith("fichier introuvable"))):
+                    action = "settings"
+                elif "blender n'est pas connecté" in low or "injoignable sur 127.0.0.1" in low:
+                    action = "blender"
+                self.toast(message.splitlines()[0], "error", action)
             except Exception as exc:  # pragma: no cover - filet de sécurité
                 self.log(f"{type(exc).__name__}: {exc}", "error")
-                self.emit("toast", text=f"Erreur inattendue : {exc}", level="error")
+                self.toast(f"Erreur inattendue : {exc}", "error")
             finally:
                 self.busy = False
                 self.emit("busy", on=False, label="")
@@ -104,6 +135,21 @@ class Backend(QObject):
             return self.file_server.url_for(self.project.preview) + f"?v={stamp}"
         return None
 
+    def _checks(self) -> dict:
+        """Check-list de démarrage, calculée sans rien lancer."""
+        blender = self.settings.blender_path
+        blender_ok = bool(shutil.which(blender) or Path(blender).expanduser().is_file())
+        if self.settings.llm_provider == "claude":
+            ai_ok, ai_label = bool(self.settings.get_api_key()), "Clé API Claude"
+        else:
+            ai_ok, ai_label = True, f"Ollama ({self.settings.ollama_model})"
+        gen_ok, gen_label = generators.ready(self.settings)
+        return {
+            "blender": {"ok": blender_ok, "label": "Blender trouvé" if blender_ok else "Blender introuvable"},
+            "ai": {"ok": ai_ok, "label": ai_label if ai_ok else "Clé API Claude manquante"},
+            "generator": {"ok": gen_ok, "label": gen_label},
+        }
+
     def _state(self) -> dict:
         settings = asdict(self.settings)
         settings.pop("_fallback_api_key", None)
@@ -122,6 +168,7 @@ class Backend(QObject):
                 "info": info,
             },
             "busy": self.busy,
+            "checks": self._checks(),
         }
 
     def _save_info(self, **updates):
@@ -131,12 +178,17 @@ class Backend(QObject):
         info.update(updates)
         path.write_text(json.dumps(info, ensure_ascii=False, indent=2))
 
+    STEP_NAMES = {"import": "Import et nettoyage", "rig": "Squelette", "animate": "Animations",
+                  "export": "Export", "info": "Infos"}
+
     def _step(self, step: str, args: dict | None = None) -> dict:
+        self._check_cancel()
         project = self._ensure_project()
         t0 = time.time()
         out = self.runner.run(project, step, args or {})
-        self.log(f"{step} : terminé en {time.time() - t0:.1f} s ({out['mode']})")
+        self.log(f"{self.STEP_NAMES.get(step, step)} : terminé en {time.time() - t0:.1f} s ({out['mode']})")
         self.emit("preview", url=self._preview_url())
+        self.emit("step_done", step=step)
         return out["result"]
 
     # ------------------------------------------------------------------
@@ -148,12 +200,12 @@ class Backend(QObject):
 
     @Slot(str)
     def newProject(self, name: str):
-        self.project = Project.new(self.settings.workspace_path, name or "perso")
+        self.project = Project.new(self.settings.workspace_path, name or "")
         self._remember_project()
         self.agent = None
         self.emit("project_changed")
         self.emit("state", state=self._state())
-        self.emit("toast", text=f"Nouveau projet : {self.project.folder.name}")
+        self.toast(f"Nouveau projet : {self.project.folder.name}")
 
     @Slot(result=str)
     def listProjects(self) -> str:
@@ -190,7 +242,136 @@ class Backend(QObject):
                 self.log(f"Blender n'a pas pu ouvrir le projet : {exc}", "error")
         self.emit("project_changed")
         self.emit("state", state=self._state())
-        self.emit("toast", text=f"Projet ouvert : {path.name}")
+        self.toast(f"Projet ouvert : {path.name}")
+
+    def _project_dir(self, folder: str) -> Path | None:
+        path = Path(folder)
+        root = self.settings.workspace_path.resolve()
+        if path.is_dir() and path.resolve().is_relative_to(root) and path.resolve() != root:
+            return path
+        return None
+
+    @Slot(str, str, result=str)
+    def renameProject(self, folder: str, new_name: str) -> str:
+        path = self._project_dir(folder)
+        name = "".join(ch if ch.isalnum() or ch in "-_ " else "-" for ch in new_name).strip()[:48]
+        if not path or not name:
+            return "Nom invalide."
+        target = path.parent / name
+        if target.exists():
+            return "Un projet porte déjà ce nom."
+        if self.busy and self.project and self.project.folder == path:
+            return "Attends la fin de la tâche en cours."
+        path.rename(target)
+        if self.project and self.project.folder == path:
+            self.project = Project(target)
+            self._remember_project()
+            self.agent = None
+            self.emit("state", state=self._state())
+        return ""
+
+    @Slot(str, result=str)
+    def deleteProject(self, folder: str) -> str:
+        """Met le projet à la corbeille du bureau (récupérable), sinon dans .corbeille/."""
+        path = self._project_dir(folder)
+        if not path:
+            return "Projet introuvable."
+        if self.project and self.project.folder == path:
+            if self.busy:
+                return "Attends la fin de la tâche en cours."
+            self.project = None
+            (self.settings.workspace_path / ".dernier-projet").unlink(missing_ok=True)
+            self.agent = None
+        trashed = False
+        if shutil.which("gio"):
+            trashed = subprocess.run(["gio", "trash", str(path)], capture_output=True).returncode == 0
+        if not trashed:
+            bin_dir = self.settings.workspace_path / ".corbeille"
+            bin_dir.mkdir(exist_ok=True)
+            shutil.move(str(path), str(bin_dir / f"{path.name} {time.strftime('%Y%m%d-%H%M%S')}"))
+        self.emit("project_changed")
+        self.emit("state", state=self._state())
+        return ""
+
+    @Slot(result=str)
+    def getUiPrefs(self) -> str:
+        try:
+            return (CONFIG_DIR / "interface.json").read_text(encoding="utf-8")
+        except OSError:
+            return "{}"
+
+    @Slot(str)
+    def setUiPrefs(self, payload: str):
+        try:
+            json.loads(payload)
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            (CONFIG_DIR / "interface.json").write_text(payload, encoding="utf-8")
+        except (ValueError, OSError):
+            pass
+
+    @Slot(result=str)
+    def getChatHistory(self) -> str:
+        if not self.project:
+            return "[]"
+        path = self.project.folder / "chat.jsonl"
+        if not path.exists():
+            return "[]"
+        lines = path.read_text(encoding="utf-8").splitlines()[-200:]
+        out = []
+        for line in lines:
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+        return json.dumps(out, ensure_ascii=False)
+
+    def _transcript(self, entry: dict):
+        if not self.project:
+            return
+        with (self.project.folder / "chat.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    @Slot(str, result=str)
+    def saveCapture(self, data_url: str) -> str:
+        project = self._ensure_project()
+        folder = project.folder / "captures"
+        folder.mkdir(exist_ok=True)
+        target = folder / f"capture-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        target.write_bytes(base64.b64decode(data_url.split(",")[-1]))
+        self.toast(f"Capture enregistrée : {target.name}", action="folder")
+        return str(target)
+
+    @Slot(str, str)
+    def testConnection(self, kind: str, payload: str):
+        """Bouton « Tester » des réglages, avec les valeurs du formulaire (pas encore enregistrées)."""
+        trial = copy.deepcopy(self.settings)
+        for key, value in json.loads(payload or "{}").items():
+            if key in trial.__dataclass_fields__ and not key.startswith("_") and value not in (None, ""):
+                current = getattr(trial, key)
+                if isinstance(current, bool):
+                    value = bool(value)
+                elif isinstance(current, int):
+                    value = int(value)
+                setattr(trial, key, value)
+        api_key = json.loads(payload or "{}").get("api_key") or trial.get_api_key()
+
+        def work():
+            try:
+                if kind == "blender":
+                    version = PipelineRunner(trial).check_blender()
+                    message = f"Blender {version} fonctionne."
+                elif kind == "ai":
+                    from .agent import check_provider
+                    message = check_provider(trial, api_key)
+                elif kind == "generator":
+                    message = generators.check(trial)
+                else:
+                    raise ValueError(kind)
+                self.emit("test_result", test=kind, ok=True, message=message)
+            except Exception as exc:  # le message part tel quel dans le formulaire
+                self.emit("test_result", test=kind, ok=False, message=str(exc).splitlines()[0])
+
+        threading.Thread(target=work, daemon=True).start()
 
     @Slot(str, result=str)
     def pickFile(self, kind: str) -> str:
@@ -224,61 +405,100 @@ class Backend(QObject):
         req = json.loads(payload)
 
         def work():
+            fresh = self.project is None
             project = self._ensure_project(req.get("name"))
+            if fresh:
+                self.emit("state", state=self._state())
             out = project.folder / "sources" / f"genere-{time.strftime('%H%M%S')}.glb"
             out.parent.mkdir(parents=True, exist_ok=True)
             self.log("Génération du modèle 3D…")
             generators.generate(self.settings, out, image=req.get("image") or None,
-                                text=req.get("text") or None, log=self.log)
-            self._import(str(out))
+                                text=req.get("text") or None, log=self.log, cancel=self.cancel_event)
+            self._import(str(out), req.get("auto"))
 
         self._job("Génération 3D", work)
 
-    def _import(self, path: str):
+    def _import(self, path: str, auto: dict | None = None):
+        if not Path(path).is_file():
+            raise StepError(f"Fichier introuvable : {path}")
+        if self.project is None:
+            # Le projet prend le nom du fichier : « penguin.glb » → projet « penguin »
+            self._ensure_project(Path(path).stem.replace("_", " "))
+            self.emit("state", state=self._state())
+        total = 4 if auto else 1
+        if auto:
+            self._progress(f"Import et nettoyage (1/{total})")
         stats = self._step("import", {"path": path, "target_faces": int(self.settings.target_faces),
                                       "height": 1.0})
-        self._save_info(source=path, mesh=stats, rig=None, animations=[])
-        self.emit("toast", text=f"Modèle prêt : {stats['faces']:,} faces".replace(",", " "))
+        self._save_info(source=path, mesh=stats, rig=None, animations=[], last_export=None)
+        if not auto:
+            self.toast(f"Modèle prêt : {stats['faces']:,} faces".replace(",", " "))
+            return
+        # Enchaînement automatique : squelette → animations → export GLB
+        self._progress(f"Squelette (2/{total})")
+        self._do_rig(quiet=True)
+        self._progress(f"Animations (3/{total})")
+        self._do_animate(auto.get("kinds") or ["idle", "walk"], float(auto.get("intensity", 1.0)), quiet=True)
+        self._progress(f"Export GLB (4/{total})")
+        self._do_export("glb", quiet=True)
+        self.toast("Personnage prêt : modélisé, squeletté, animé et exporté.", action="folder")
 
     @Slot(str)
     def importModel(self, path: str):
         self._job("Import et nettoyage", self._import, path)
 
+    @Slot(str, str)
+    def importModelAuto(self, path: str, auto: str):
+        self._job("Import et nettoyage", self._import, path, json.loads(auto))
+
+    def _do_rig(self, quiet=False):
+        res = self._step("rig")
+        self._save_info(rig=res)
+        if not quiet:
+            self.toast(f"Squelette posé ({len(res['bones'])} os, poids {res['skinning']})")
+
     @Slot()
     def rig(self):
-        def work():
-            res = self._step("rig")
-            self._save_info(rig=res)
-            self.emit("toast", text=f"Squelette posé ({len(res['bones'])} os, poids {res['skinning']})")
+        self._job("Pose du squelette", self._do_rig)
 
-        self._job("Pose du squelette", work)
+    def _do_animate(self, kinds, intensity, quiet=False):
+        res = self._step("animate", {"kinds": kinds, "intensity": intensity})
+        self._save_info(animations=res["animations"])
+        if not quiet:
+            self.toast("Animations : " + ", ".join(res["animations"]))
 
     @Slot(str)
     def animate(self, payload: str):
         req = json.loads(payload)
+        self._job("Animation", self._do_animate, req.get("kinds") or ["idle", "walk"],
+                  float(req.get("intensity", 1.0)))
 
-        def work():
-            res = self._step("animate", {"kinds": req.get("kinds") or ["idle", "walk"],
-                                         "intensity": float(req.get("intensity", 1.0))})
-            self._save_info(animations=res["animations"])
-            self.emit("toast", text="Animations : " + ", ".join(res["animations"]))
-
-        self._job("Animation", work)
+    def _do_export(self, fmt, quiet=False):
+        project = self._ensure_project()
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in project.folder.name)
+        path = project.exports / f"{safe.strip('-') or 'perso'}.{fmt}"
+        res = self._step("export", {"path": str(path), "fmt": fmt})
+        self._save_info(last_export=res["path"])
+        if fmt == "glb":
+            self._write_web_page(project, path)
+        if not quiet:
+            self.toast(f"Exporté : {Path(res['path']).name} ({res['size_kb']} Ko)", action="folder")
+        self.emit("exported", path=res["path"])
 
     @Slot(str)
     def exportModel(self, fmt: str):
-        def work():
-            project = self._ensure_project()
-            safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in project.folder.name)
-            path = project.exports / f"{safe.strip('-') or 'perso'}.{fmt}"
-            res = self._step("export", {"path": str(path), "fmt": fmt})
-            self._save_info(last_export=res["path"])
-            if fmt == "glb":
-                self._write_web_page(project, path)
-            self.emit("toast", text=f"Exporté : {Path(res['path']).name} ({res['size_kb']} Ko)")
-            self.emit("exported", path=res["path"])
+        self._job("Export", self._do_export, fmt)
 
-        self._job("Export", work)
+    @Slot()
+    def cancel(self):
+        """Bouton Annuler : arrête la génération, le Blender d'arrière-plan ou l'IA."""
+        if not self.busy:
+            return
+        self.cancel_event.set()
+        killed = self.runner.cancel()
+        self.stopAgent()
+        if not killed and self.runner.bridge.is_alive():
+            self.log("L'étape en cours dans Blender ouvert va se terminer, la suite est annulée.")
 
     def _write_web_page(self, project: Project, glb: Path):
         """Petite page three.js prête à mettre en ligne, à côté du .glb exporté."""
@@ -290,24 +510,28 @@ class Backend(QObject):
     def openBlender(self):
         try:
             self.runner.open_in_blender(self.project)
-            self.emit("toast", text="Blender démarre avec le pont activé…")
+            self.toast("Blender démarre avec le pont activé…")
         except FileNotFoundError:
-            self.emit("toast", text="Blender introuvable : règle son chemin dans Réglages.", level="error")
+            self.toast("Blender introuvable : règle son chemin dans Réglages.", "error", "settings")
+            return
 
         def wait_bridge():
             for _ in range(60):
                 time.sleep(1)
                 if self.runner.bridge.is_alive():
                     self.emit("state", state=self._state())
-                    self.emit("toast", text="Blender est connecté.")
+                    self.toast("Blender est connecté.")
                     return
+            self.toast("Blender ne s'est pas connecté au bout d'une minute. Vérifie qu'il s'est bien ouvert.",
+                       "warn")
 
         threading.Thread(target=wait_bridge, daemon=True).start()
 
     @Slot()
     def openFolder(self):
         if self.project:
-            subprocess.Popen(["xdg-open", str(self.project.folder)])
+            target = self.project.folder / "exports"
+            subprocess.Popen(["xdg-open", str(target if target.exists() else self.project.folder)])
 
     @Slot()
     def refresh(self):
@@ -351,7 +575,9 @@ class Backend(QObject):
     def _agent_event(self, event: dict):
         # Les événements de l'agent ont leur propre « kind » (assistant, tool…) : on le
         # range dans « sub » pour ne pas écraser le type de message envoyé à la page.
-        self.emit("agent", **{**{k: v for k, v in event.items() if k != "kind"}, "sub": event["kind"]})
+        payload = {**{k: v for k, v in event.items() if k != "kind"}, "sub": event["kind"]}
+        self.emit("agent", **payload)
+        self._transcript(payload)
 
     def _confirm(self, code: str, explanation: str) -> bool:
         cid = uuid.uuid4().hex
@@ -372,9 +598,14 @@ class Backend(QObject):
 
     @Slot(str)
     def chat(self, text: str):
+        self._ensure_project()
+        self._transcript({"sub": "user", "text": text})
         if not self.runner.bridge.is_alive():
-            self.emit("agent", sub="guard", text=(
-                "Blender n'est pas connecté. Clique sur « Ouvrir dans Blender » puis renvoie ta demande."))
+            self._agent_event({"kind": "guard", "text": (
+                "Blender n'est pas connecté. Clique sur « Ouvrir dans Blender », puis renvoie ta demande.")})
+            return
+        if self.settings.llm_provider == "claude" and not self.settings.get_api_key():
+            self._agent_event({"kind": "guard", "text": "Ajoute ta clé API Claude dans Réglages pour discuter."})
             return
         agent = self._get_agent()
         self._job("L'IA travaille dans Blender", agent.ask, text)
@@ -389,6 +620,7 @@ class Backend(QObject):
 
     @Slot()
     def resetChat(self):
-        if self.agent:
-            self.agent.reset()
-        self.emit("toast", text="Conversation effacée.")
+        if self.project:
+            self._get_agent().reset()
+            (self.project.folder / "chat.jsonl").unlink(missing_ok=True)
+        self.toast("Conversation effacée.")

@@ -79,6 +79,17 @@ def main():
 
     assert low_points(0) != low_points(8), "les jambes ne bougent pas"
 
+    # Un fichier illisible ne doit pas vider la scène existante
+    bad = os.path.join(tmp, "casse.glb")
+    with open(bad, "wb") as fh:
+        fh.write(b"pas un vrai glb")
+    try:
+        P.run_step("import", {"path": bad})
+        raise AssertionError("l'import d'un fichier cassé aurait dû échouer")
+    except RuntimeError as exc:
+        print("import cassé refusé :", exc)
+    assert P.CHAR_NAME in bpy.data.objects and P.RIG_NAME in bpy.data.objects, "scène perdue"
+
     # FBX : chaque animation doit devenir une « take »
     fbx = os.path.join(tmp, "out.fbx")
     P.run_step("export", {"path": fbx, "fmt": "fbx"})

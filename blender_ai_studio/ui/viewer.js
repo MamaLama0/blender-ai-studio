@@ -50,6 +50,9 @@ export class Viewer {
     ring.position.y = 0.001;
     this.scene.add(ring);
     this.disc = disc;
+    // Le plateau n'apparaît qu'avec un personnage : la page vide reste lisible.
+    this.stageProps = [disc, ring];
+    this.stageProps.forEach((o) => (o.visible = false));
 
     this.timer = new THREE.Timer();
     this.mixer = null;
@@ -57,6 +60,9 @@ export class Viewer {
     this.current = null;
     this.paused = false;
     this.model = null;
+    this.speed = 1;
+    this.options = { skeleton: false, wireframe: false, turntable: false };
+    this.skeletonHelper = null;
 
     new ResizeObserver(() => this.resize()).observe(canvas.parentElement);
     this.resize();
@@ -74,14 +80,18 @@ export class Viewer {
   tick() {
     this.timer.update();
     const dt = this.timer.getDelta();
-    if (this.mixer && !this.paused) this.mixer.update(dt);
+    if (this.mixer && !this.paused) this.mixer.update(dt * this.speed);
+    if (this.model && this.options.turntable) this.model.rotation.y += dt * 0.6;
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   }
 
   async load(url) {
     const gltf = await new GLTFLoader().loadAsync(url);
+    const previousClip = this.current?.getClip().name;
+    const previousSpin = this.model?.rotation.y || 0;
     if (this.model) this.scene.remove(this.model);
+    this._removeSkeleton();
     this.model = gltf.scene;
     this.model.traverse((o) => {
       if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
@@ -97,25 +107,87 @@ export class Viewer {
     this.model.position.x -= center.x;
     this.model.position.z -= center.z;
     this.model.position.y -= new THREE.Box3().setFromObject(this.model).min.y;
+    this.model.rotation.y = previousSpin;
     this.scene.add(this.model);
+    this.stageProps.forEach((o) => (o.visible = true));
 
     if (!this._framed) {
-      this.controls.target.set(0, 0.5, 0);
-      this.camera.position.set(1.9, 1.3, 2.9);
+      this.frame();
       this._framed = true;
     }
+    this.setWireframe(this.options.wireframe);
+    this.setSkeleton(this.options.skeleton);
 
     this.mixer = new THREE.AnimationMixer(this.model);
     this.actions = {};
     for (const clip of gltf.animations) this.actions[clip.name] = this.mixer.clipAction(clip);
     const names = Object.keys(this.actions);
     this.current = null;
-    if (names.length) this.play(names.includes("Walk") ? "Walk" : names[0]);
+    // Après une mise à jour du modèle, on garde l'animation qu'on regardait
+    if (names.length) this.play(names.includes(previousClip) ? previousClip : names.includes("Walk") ? "Walk" : names[0]);
     return names;
+  }
+
+  frame() {
+    this.controls.target.set(0, 0.5, 0);
+    this.camera.position.set(1.9, 1.3, 2.9);
+    this.controls.update();
+  }
+
+  setWireframe(on) {
+    this.options.wireframe = on;
+    this.model?.traverse((o) => {
+      if (!o.isMesh) return;
+      for (const m of [].concat(o.material)) m.wireframe = on;
+    });
+  }
+
+  _removeSkeleton() {
+    if (this.skeletonHelper) {
+      this.scene.remove(this.skeletonHelper);
+      this.skeletonHelper.dispose?.();
+      this.skeletonHelper = null;
+    }
+  }
+
+  /** Renvoie false s'il n'y a pas de squelette à montrer. */
+  setSkeleton(on) {
+    this.options.skeleton = on;
+    this._removeSkeleton();
+    if (!on || !this.model) return true;
+    let hasBones = false;
+    this.model.traverse((o) => { if (o.isBone) hasBones = true; });
+    if (!hasBones) return false;
+    this.skeletonHelper = new THREE.SkeletonHelper(this.model);
+    this.skeletonHelper.material.depthTest = false;
+    this.skeletonHelper.material.linewidth = 2;
+    this.skeletonHelper.renderOrder = 10;
+    this.scene.add(this.skeletonHelper);
+    return true;
+  }
+
+  setTurntable(on) {
+    this.options.turntable = on;
+  }
+
+  setSpeed(x) {
+    this.speed = x;
+  }
+
+  /** Image PNG de la vue actuelle (data URL). */
+  capture() {
+    const previous = this.scene.background;
+    this.scene.background = new THREE.Color(0x1c1f26); // fond opaque pour l'image enregistrée
+    this.renderer.render(this.scene, this.camera);
+    const url = this.renderer.domElement.toDataURL("image/png");
+    this.scene.background = previous;
+    return url;
   }
 
   clear() {
     if (this.model) this.scene.remove(this.model);
+    this._removeSkeleton();
+    this.stageProps.forEach((o) => (o.visible = false));
     this.model = null;
     this.mixer = null;
     this.actions = {};

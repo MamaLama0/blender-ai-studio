@@ -14,10 +14,15 @@ from blender_ai_studio.app import build  # noqa: E402
 
 out_dir = sys.argv[1]
 os.makedirs(out_dir, exist_ok=True)
-steps = [s for s in os.environ.get("SHOTS", "accueil:3000").split(";;") if s]
+if os.environ.get("SHOTS_FILE"):  # un pas par ligne, plus simple pour les longs scénarios
+    with open(os.environ["SHOTS_FILE"], encoding="utf-8") as fh:
+        steps = [line.rstrip("\n") for line in fh if line.strip() and not line.startswith("#")]
+else:
+    steps = [s for s in os.environ.get("SHOTS", "accueil:3000").split(";;") if s]
 
 app, window, view, backend = build()
-window.resize(1440, 900)
+w, h = (int(v) for v in os.environ.get("WIN_SIZE", "1440x900").split("x"))
+window.resize(w, h)
 window.show()
 
 console = []

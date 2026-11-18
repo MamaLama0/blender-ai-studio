@@ -116,9 +116,25 @@ def build():
 
     server = LocalFileServer(settings.workspace_path, {"qwebchannel.js": qwebchannel_js})
 
-    window = QMainWindow()
+    from PySide6.QtCore import QSettings
+
+    class MainWindow(QMainWindow):
+        """Retient la taille et la position de la fenêtre d'un lancement à l'autre."""
+
+        def __init__(self):
+            super().__init__()
+            self.store = QSettings("blender-ai-studio", "fenetre")
+            geometry = self.store.value("geometry")
+            if geometry is None or not self.restoreGeometry(geometry):
+                self.resize(1440, 900)
+
+        def closeEvent(self, event):
+            self.store.setValue("geometry", self.saveGeometry())
+            super().closeEvent(event)
+
+    window = MainWindow()
     window.setWindowTitle("Blender AI Studio")
-    window.resize(1440, 900)
+    window.setMinimumSize(900, 600)
     view = QWebEngineView(window)
     view.page().setBackgroundColor(Qt_color("#16181d"))
     web_settings = view.settings()

@@ -76,20 +76,30 @@ def step_import(path, target_faces=20000, height=1.0, clear_scene=True):
     ext = os.path.splitext(path)[1].lower()
     if ext not in IMPORTERS:
         raise ValueError(f"Format non géré : {ext} (glb, gltf, obj, fbx, stl, ply)")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Fichier introuvable : {path}")
     _ensure_object_mode()
 
-    if clear_scene:
-        for obj in list(bpy.data.objects):
-            bpy.data.objects.remove(obj, do_unlink=True)
-        for action in list(bpy.data.actions):
-            bpy.data.actions.remove(action)
-
+    # On importe AVANT de vider la scène : si le fichier est illisible, rien n'est perdu.
     before = set(bpy.data.objects)
-    IMPORTERS[ext](path)
+    old_actions = set(bpy.data.actions)
+    try:
+        IMPORTERS[ext](path)
+    except RuntimeError as exc:
+        detail = str(exc).strip().splitlines()[-1] if str(exc).strip() else ""
+        raise RuntimeError(f"Blender n'arrive pas à lire ce fichier ({os.path.basename(path)}). {detail}") from exc
     new_objects = [o for o in bpy.data.objects if o not in before]
     meshes = [o for o in new_objects if o.type == "MESH"]
     if not meshes:
+        for obj in new_objects:
+            bpy.data.objects.remove(obj, do_unlink=True)
         raise RuntimeError("Le fichier ne contient aucun maillage.")
+
+    if clear_scene:
+        for obj in before:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        for action in old_actions:
+            bpy.data.actions.remove(action)
 
     # On garde les maillages, on retire les vides/caméras/os importés
     for obj in new_objects:

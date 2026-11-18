@@ -21,14 +21,28 @@
       <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="#mark"/></svg>
       <span>Blender AI Studio</span>
     </div>
-    <button class="project-pill" id="projectPill" title="Créer ou ouvrir un projet">
+    <button class="project-pill" id="projectPill" title="Créer ou ouvrir un projet (Ctrl+N)">
       <span class="project-name" id="projectName">Aucun projet</span>
       <span class="project-new">Projets</span>
     </button>
+
+    <!-- Tâche en cours : quoi, depuis combien de temps, et comment l'arrêter -->
+    <div class="job" id="job" hidden role="status">
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="job-label" id="jobLabel"></span>
+      <span class="job-time" id="jobTime">0 s</span>
+      <button class="job-cancel" id="cancelBtn" title="Annuler (Échap)">Annuler</button>
+    </div>
+
     <div class="topbar-right">
       <span class="status" id="gpuStatus" title=""></span>
-      <span class="status" id="blenderStatus"><i class="dot"></i><span>Blender</span></span>
-      <button class="icon-btn" id="settingsBtn" aria-label="Réglages" title="Réglages">
+      <button class="status status-btn" id="blenderStatus" title="Ouvrir Blender avec le pont">
+        <i class="dot"></i><span>Blender</span>
+      </button>
+      <button class="icon-btn" id="helpBtn" aria-label="Raccourcis clavier" title="Raccourcis clavier (?)">
+        <svg viewBox="0 0 24 24"><use href="#i-keys"/></svg>
+      </button>
+      <button class="icon-btn" id="settingsBtn" aria-label="Réglages" title="Réglages (Ctrl+,)">
         <svg viewBox="0 0 24 24"><use href="#i-gear"/></svg>
       </button>
     </div>
@@ -45,16 +59,19 @@
             <span class="step-state"></span>
           </button>
           <div class="step-body">
-            <label class="drop" id="imageDrop" tabindex="0">
-              <img id="imageThumb" alt="" hidden>
-              <span class="drop-text" id="imageDropText">Dépose une image de ton personnage<br><small>ou clique pour la choisir</small></span>
-            </label>
+            <div class="drop" id="imageDrop" tabindex="0" role="button" aria-label="Choisir une image">
+              <img id="imageThumb" alt="Image de référence" hidden>
+              <span class="drop-text">Dépose une image de ton personnage<br><small>ou clique pour la choisir</small></span>
+              <button class="drop-clear" id="imageClear" type="button" title="Retirer l'image" aria-label="Retirer l'image" hidden>
+                <svg viewBox="0 0 24 24"><use href="#i-x"/></svg>
+              </button>
+            </div>
             <textarea id="promptText" rows="3" placeholder="…ou décris-le : un pingouin bleu avec un chapeau de cowboy et une moustache"></textarea>
             <p class="hint" id="engineHint"></p>
-            <div class="row">
-              <button class="btn primary" id="generateBtn">Générer le modèle 3D</button>
-            </div>
-            <button class="btn ghost full" id="importBtn">Importer un fichier 3D existant</button>
+            <label class="check"><input type="checkbox" id="autoChain" checked>
+              <span>Enchaîner squelette, animations et export</span></label>
+            <button class="btn primary" id="generateBtn" title="Ctrl+Entrée">Générer le modèle 3D</button>
+            <button class="btn ghost" id="importBtn" title="Ctrl+O">Importer un fichier 3D existant</button>
           </div>
         </li>
 
@@ -70,6 +87,7 @@
               <span>Nombre de faces visé <output id="facesOut">20 000</output></span>
               <input type="range" id="facesRange" min="2000" max="80000" step="1000" value="20000">
             </label>
+            <p class="hint">Moins de faces : plus léger pour le web et les jeux. Plus de faces : plus de détails. Ré-importer refait le squelette et les animations.</p>
             <button class="btn" id="reimportBtn">Ré-importer avec ce réglage</button>
           </div>
         </li>
@@ -82,7 +100,7 @@
           </button>
           <div class="step-body">
             <p class="hint">Hanches, colonne, tête, bras et jambes sont placés d'après la forme du personnage, puis le maillage est lié aux os.</p>
-            <button class="btn primary" id="rigBtn">Rigger automatiquement</button>
+            <button class="btn primary" id="rigBtn">Poser le squelette</button>
             <p class="stat" id="rigStat"></p>
           </div>
         </li>
@@ -122,7 +140,7 @@
               <button class="export" data-fmt="obj"><b>OBJ</b><span>Impression, sans animation</span></button>
             </div>
             <p class="hint">L'export GLB crée aussi une page web prête à mettre en ligne.</p>
-            <button class="btn ghost full" id="folderBtn">Ouvrir le dossier du projet</button>
+            <button class="btn ghost" id="folderBtn">Ouvrir le dossier des exports</button>
           </div>
         </li>
       </ol>
@@ -131,20 +149,35 @@
     <!-- Vue 3D -->
     <section class="stage" id="stage" aria-label="Aperçu 3D">
       <canvas id="viewport"></canvas>
+
       <div class="stage-empty" id="stageEmpty">
         <svg viewBox="0 0 120 120" aria-hidden="true"><use href="#turntable"/></svg>
         <h1>Ton personnage apparaîtra ici</h1>
         <p>Commence par une image ou une description à gauche, ou glisse un fichier .glb, .fbx ou .obj sur cette zone.</p>
+        <ul class="checklist" id="checklist" aria-label="Avant de commencer"></ul>
       </div>
+
       <div class="stage-top">
         <button class="btn blender" id="openBlenderBtn">
           <svg viewBox="0 0 24 24"><use href="#i-blender"/></svg>Ouvrir dans Blender
         </button>
       </div>
-      <div class="clips" id="clips" hidden>
-        <button class="clip-play" id="playBtn" aria-label="Pause"><svg viewBox="0 0 24 24"><use href="#i-pause"/></svg></button>
-        <div class="clip-list" id="clipList"></div>
+
+      <div class="tools" id="tools" role="toolbar" aria-label="Affichage" hidden>
+        <button data-tool="frame" title="Recadrer (F)" aria-label="Recadrer"><svg viewBox="0 0 24 24"><use href="#i-frame"/></svg></button>
+        <button data-tool="skeleton" aria-pressed="false" title="Afficher le squelette (K)" aria-label="Squelette"><svg viewBox="0 0 24 24"><use href="#i-bone"/></svg></button>
+        <button data-tool="wireframe" aria-pressed="false" title="Fil de fer (W)" aria-label="Fil de fer"><svg viewBox="0 0 24 24"><use href="#i-wire"/></svg></button>
+        <button data-tool="turntable" aria-pressed="false" title="Rotation automatique (R)" aria-label="Rotation automatique"><svg viewBox="0 0 24 24"><use href="#i-spin"/></svg></button>
+        <hr>
+        <button data-tool="capture" title="Enregistrer une image (P)" aria-label="Capture"><svg viewBox="0 0 24 24"><use href="#i-camera"/></svg></button>
       </div>
+
+      <div class="clips" id="clips" hidden>
+        <button class="clip-play" id="playBtn" aria-label="Pause" title="Lecture / pause (Espace)"><svg viewBox="0 0 24 24"><use href="#i-pause"/></svg></button>
+        <div class="clip-list" id="clipList"></div>
+        <button class="clip-speed" id="speedBtn" title="Vitesse de lecture">1×</button>
+      </div>
+
       <div class="drop-veil" id="dropVeil" hidden><span>Lâche le fichier pour l'importer</span></div>
     </section>
 
@@ -168,8 +201,9 @@
         </div>
       </div>
       <form class="composer" id="composer">
-        <textarea id="chatInput" rows="2" placeholder="Écris ta demande…" aria-label="Message"></textarea>
+        <textarea id="chatInput" rows="2" placeholder="Écris ta demande… (Entrée pour envoyer)" aria-label="Message"></textarea>
         <div class="composer-actions">
+          <span class="composer-hint" id="composerHint"></span>
           <button type="button" class="btn ghost small" id="stopBtn" hidden>Arrêter</button>
           <button type="submit" class="btn primary small" id="sendBtn">Envoyer</button>
         </div>
@@ -178,7 +212,7 @@
   </main>
 
   <footer class="journal" id="journal">
-    <button class="journal-line" id="journalToggle" aria-expanded="false">
+    <button class="journal-line" id="journalToggle" aria-expanded="false" title="Afficher le journal">
       <span id="journalLast">Prêt.</span>
     </button>
     <ol class="journal-list" id="journalList"></ol>
@@ -192,8 +226,12 @@
       <h2>Réglages</h2>
 
       <section>
-        <h3>IA qui pilote Blender</h3>
-        <div class="seg" role="radiogroup">
+        <div class="section-head">
+          <h3>IA qui pilote Blender</h3>
+          <button type="button" class="btn small ghost test" data-test="ai">Tester</button>
+        </div>
+        <p class="test-result" data-result="ai" hidden></p>
+        <div class="seg" role="radiogroup" aria-label="Fournisseur d'IA">
           <label><input type="radio" name="llm_provider" value="claude"><span>Claude (en ligne)</span></label>
           <label><input type="radio" name="llm_provider" value="ollama"><span>Ollama (local)</span></label>
         </div>
@@ -219,7 +257,11 @@
       </section>
 
       <section>
-        <h3>Génération 3D</h3>
+        <div class="section-head">
+          <h3>Génération 3D</h3>
+          <button type="button" class="btn small ghost test" data-test="generator">Tester</button>
+        </div>
+        <p class="test-result" data-result="generator" hidden></p>
         <p class="hint" id="gpuAdvice"></p>
         <label class="field"><span>Moteur</span>
           <select name="generator">
@@ -243,7 +285,11 @@
       </section>
 
       <section>
-        <h3>Blender et fichiers</h3>
+        <div class="section-head">
+          <h3>Blender et fichiers</h3>
+          <button type="button" class="btn small ghost test" data-test="blender">Tester</button>
+        </div>
+        <p class="test-result" data-result="blender" hidden></p>
         <label class="field"><span>Programme Blender</span><input name="blender_path"></label>
         <div class="two">
           <label class="field"><span>Port du pont</span><input type="number" name="bridge_port"></label>
@@ -274,6 +320,29 @@
     </form>
   </dialog>
 
+  <!-- Raccourcis -->
+  <dialog class="modal keys" id="keysDialog">
+    <form method="dialog">
+      <h2>Raccourcis clavier</h2>
+      <dl class="keylist">
+        <dt><kbd>Ctrl</kbd> <kbd>N</kbd></dt><dd>Projets : créer ou ouvrir</dd>
+        <dt><kbd>Ctrl</kbd> <kbd>O</kbd></dt><dd>Importer un fichier 3D</dd>
+        <dt><kbd>Ctrl</kbd> <kbd>Entrée</kbd></dt><dd>Générer le modèle (depuis la description)</dd>
+        <dt><kbd>Alt</kbd> <kbd>1</kbd> … <kbd>5</kbd></dt><dd>Ouvrir une étape</dd>
+        <dt><kbd>Échap</kbd></dt><dd>Annuler la tâche en cours</dd>
+        <dt><kbd>Espace</kbd></dt><dd>Lecture / pause de l'animation</dd>
+        <dt><kbd>F</kbd></dt><dd>Recadrer la vue</dd>
+        <dt><kbd>K</kbd></dt><dd>Afficher le squelette</dd>
+        <dt><kbd>W</kbd></dt><dd>Fil de fer</dd>
+        <dt><kbd>R</kbd></dt><dd>Rotation automatique</dd>
+        <dt><kbd>P</kbd></dt><dd>Enregistrer une image de la vue</dd>
+        <dt><kbd>/</kbd></dt><dd>Écrire à l'assistant</dd>
+        <dt><kbd>Ctrl</kbd> <kbd>,</kbd></dt><dd>Réglages</dd>
+      </dl>
+      <div class="modal-actions"><button value="close" class="btn primary">Fermer</button></div>
+    </form>
+  </dialog>
+
   <!-- Validation du code -->
   <template id="confirmTpl">
     <div class="msg confirm">
@@ -300,10 +369,19 @@
       <circle cx="52" cy="46" r="3" fill="currentColor"/><circle cx="68" cy="46" r="3" fill="currentColor"/>
     </symbol>
     <symbol id="i-gear" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM19.4 13.5l1.6 1.2-2 3.4-1.9-.7a7.5 7.5 0 0 1-1.7 1l-.3 2h-4l-.3-2a7.5 7.5 0 0 1-1.7-1l-1.9.7-2-3.4 1.6-1.2a7.6 7.6 0 0 1 0-2L3 10.3l2-3.4 1.9.7a7.5 7.5 0 0 1 1.7-1l.3-2h4l.3 2a7.5 7.5 0 0 1 1.7 1l1.9-.7 2 3.4-1.6 1.2a7.6 7.6 0 0 1 0 2z"/></symbol>
+    <symbol id="i-keys" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8" stroke-linecap="round"/></g></symbol>
     <symbol id="i-blender" viewBox="0 0 24 24"><circle cx="14" cy="13" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="14" cy="13" r="2.2" fill="currentColor"/><path d="M3 9h7M6 5l6 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" fill="currentColor"/></symbol>
     <symbol id="i-erase" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-frame" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/></symbol>
+    <symbol id="i-bone" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M7.5 4.5a2 2 0 0 0-3 2.6 2 2 0 0 0 2.4 2.4l9.6 9.6a2 2 0 0 0 2.4 2.4 2 2 0 0 0 2.6-3 2 2 0 0 0-2.4-2.4L9.5 6.5a2 2 0 0 0-2-2z"/></symbol>
+    <symbol id="i-wire" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 3v18M4 7.5l16 9M20 7.5l-16 9"/></symbol>
+    <symbol id="i-spin" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><ellipse cx="12" cy="15" rx="8" ry="3.5"/><path d="M17 9.5l3 1.5-1 3"/><path d="M12 4v7"/></g></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></g></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></g></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"/></symbol>
   </svg>
 
   <script type="module" src="main.js"></script>

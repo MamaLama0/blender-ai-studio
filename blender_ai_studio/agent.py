@@ -98,6 +98,38 @@ class AgentError(RuntimeError):
     pass
 
 
+def check_provider(settings: Settings, api_key: str = "") -> str:
+    """Bouton « Tester » : vérifie la clé / le serveur et la présence du modèle."""
+    if settings.llm_provider == "claude":
+        key = api_key or settings.get_api_key()
+        if not key:
+            raise AgentError("Aucune clé API Claude.")
+        req = urllib.request.Request("https://api.anthropic.com/v1/models?limit=100",
+                                     headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+        try:
+            data = json.loads(urllib.request.urlopen(req, timeout=15).read())
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise AgentError("Clé API refusée par Anthropic.") from exc
+            raise AgentError(f"API Claude : HTTP {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise AgentError(f"API Claude injoignable : {exc.reason}") from exc
+        ids = [m.get("id", "") for m in data.get("data", [])]
+        if ids and settings.claude_model not in ids:
+            raise AgentError(f"Clé valide, mais {settings.claude_model} n'est pas dans la liste de tes modèles.")
+        return f"Clé valide, {settings.claude_model} disponible."
+    base = settings.ollama_url.rstrip("/")
+    try:
+        data = json.loads(urllib.request.urlopen(f"{base}/api/tags", timeout=5).read())
+    except (urllib.error.URLError, OSError) as exc:
+        raise AgentError(f"Ollama ne répond pas sur {base}. Lance « ollama serve ».") from exc
+    names = {m.get("name", "") for m in data.get("models", [])}
+    wanted = settings.ollama_model
+    if wanted not in names and f"{wanted}:latest" not in names:
+        raise AgentError(f"Ollama répond, mais le modèle {wanted} n'est pas téléchargé : ollama pull {wanted}")
+    return f"Ollama répond, {wanted} est prêt."
+
+
 def _norm_error(text: str) -> str:
     """Normalise un message d'erreur pour détecter les répétitions."""
     text = re.sub(r"0x[0-9a-f]+|\d+(\.\d+)?", "#", text.lower())
@@ -119,12 +151,15 @@ class Agent:
         self.run_step = run_step
         self.bridge = BlenderBridge(settings.bridge_host, settings.bridge_port)
         self.log_file = log_dir / "decisions.jsonl"
-        self.messages: list[dict] = []
+        # Un fichier par fournisseur : les formats de messages de Claude et d'Ollama diffèrent.
+        self.history_file = log_dir / f"conversation-{settings.llm_provider}.json"
+        self.messages: list[dict] = self._load_history()
         self.stop_requested = False
 
     # ------------------------------------------------------------------
     def reset(self):
         self.messages = []
+        self.history_file.unlink(missing_ok=True)
 
     def ask(self, user_text: str) -> None:
         self.stop_requested = False
@@ -138,6 +173,42 @@ class Agent:
             # On ne garde pas un historique à moitié écrit (appel d'outil sans résultat…)
             del self.messages[snapshot:]
             raise
+        finally:
+            self._save_history()
+
+    def _load_history(self) -> list[dict]:
+        try:
+            data = json.loads(self.history_file.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []
+
+    def _save_history(self):
+        """Garde le fil de la conversation entre deux lancements (sans les captures d'écran)."""
+        def strip(block):
+            if isinstance(block, dict) and block.get("type") == "image":
+                return {"type": "text", "text": "[capture retirée]"}
+            if isinstance(block, dict) and isinstance(block.get("content"), list):
+                return {**block, "content": [strip(b) for b in block["content"]]}
+            return block
+
+        clean = []
+        for msg in self.messages[-60:]:
+            content = msg.get("content")
+            if isinstance(content, list):
+                msg = {**msg, "content": [strip(b) for b in content]}
+            clean.append(msg)
+        # L'historique ne doit pas commencer par des résultats d'outils orphelins
+        while clean and clean[0].get("role") != "user" or (
+                clean and isinstance(clean[0].get("content"), list)
+                and any(b.get("type") == "tool_result" for b in clean[0]["content"])):
+            clean.pop(0)
+            if not clean:
+                break
+        try:
+            self.history_file.write_text(json.dumps(clean, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     def _log(self, **entry):

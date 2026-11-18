@@ -18,7 +18,31 @@ Une IA (Claude ou un modèle local) pilote Blender pour tout le reste, en langag
 | **Assistant** | « Ajoute un chapeau de cowboy », « fais-lui une danse » : l'IA lit la scène et exécute du Python dans Blender, avec ta validation. |
 
 L'aperçu 3D (three.js) se met à jour après chaque étape et lit toutes les animations.
-Le bouton **Projets** en haut crée un nouveau personnage ou rouvre un ancien.
+
+## Confort d'utilisation
+
+- **Tout d'un coup** : case « Enchaîner squelette, animations et export » (cochée par défaut).
+  Une image ou un fichier 3D, un clic, et le personnage ressort animé et exporté.
+- **Annuler** à tout moment : bouton dans la barre du haut ou `Échap`, avec le temps écoulé.
+- **Check-list de démarrage** au premier lancement (Blender, IA, génération 3D), et boutons
+  **Tester** dans les réglages, qui essaient les valeurs avant même de les enregistrer.
+- **Vue 3D** : recadrer, squelette, fil de fer, rotation automatique, capture PNG,
+  vitesse de lecture ×0,5 / ×1 / ×2. Tes choix sont retenus.
+- **Projets** : créer, rouvrir, renommer, mettre à la corbeille (récupérable). Le projet prend
+  le nom du fichier importé, et l'app rouvre la première étape qui reste à faire.
+- **Assistant** : la conversation est gardée par projet (et relue après un redémarrage),
+  réponses mises en forme, bouton pour copier le code.
+- **Notifications** avec raccourci vers la bonne action (réglages, dossier, Blender).
+- **Raccourcis clavier** : bouton clavier en haut à droite ou `?`.
+
+| Touche | Action | Touche | Action |
+|---|---|---|---|
+| `Ctrl+N` | Projets | `Espace` | Lecture / pause |
+| `Ctrl+O` | Importer un fichier 3D | `F` | Recadrer |
+| `Ctrl+Entrée` | Générer depuis la description | `K` | Squelette |
+| `Alt+1…5` | Ouvrir une étape | `W` | Fil de fer |
+| `Échap` | Annuler la tâche | `R` | Rotation automatique |
+| `/` | Écrire à l'assistant | `P` | Capture PNG |
 
 ![L'assistant demande ta validation avant d'exécuter du code](docs/assistant.png)
 
@@ -104,8 +128,12 @@ Installer depuis le disque* → `bas_bridge.py`, puis panneau **AI Studio** (tou
   apercu.glb          ce qu'affiche l'aperçu
   sources/            images et modèles d'origine
   exports/            .glb/.fbx/.obj + index.html (page web three.js)
-  decisions.jsonl     journal de l'assistant
+  captures/           images enregistrées depuis la vue 3D
+  chat.jsonl          conversation affichée
+  conversation-*.json mémoire de l'assistant (Claude ou Ollama)
+  decisions.jsonl     journal des décisions de l'assistant
 ~/.config/blender-ai-studio/config.json   réglages
+~/.config/blender-ai-studio/interface.json  préférences d'affichage
 ```
 
 ## Comment l'auto-rig trouve les os
@@ -155,6 +183,7 @@ React (Cue, shadcn…) plus tard sans toucher au moteur Python.
 pip install bpy PySide6           # bpy = Blender en module Python
 python tests/test_pipeline_bpy.py # import → rig → 4 animations → export GLB vérifié
 python tests/test_bridge_agent.py # pont, pipeline en direct, agent Claude/Ollama et garde-fous (IA simulée)
+QT_QPA_PLATFORM=offscreen python tests/test_backend.py   # annulation, enchaînement, Tester, projets, historique
 python tests/visual_check.py /tmp/rendus penguin humanoid blob   # planches de rendu du rig
 ```
 
