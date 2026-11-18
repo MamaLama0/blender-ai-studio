@@ -155,6 +155,60 @@ def main():
     st = json.loads(b.getState())
     check("check-list présente", set(st["checks"]) == {"blender", "ai", "generator"})
     check("Blender trouvé", st["checks"]["blender"]["ok"])
+    check("routeur coupé par défaut", st["router"]["provider"] == "none")
+
+    # 10. Routeur (Jev simulé) branché sur la génération et les étapes
+    events.clear()
+    r = make_backend(router_provider="jev", router_mode="active")
+    r.settings.generator = "custom_command"
+    r.settings.custom_command = f"cp {MODEL} {{output}}"
+    plan = {"generation": ["proceed", "reuse_cache"], "rerun_step": ["reuse_cache", "ask_human"]}
+    seen = []
+
+    def fake_jev(_settings, state):
+        seen.append((state["task_type"], state["context"].get("cached_result_available")))
+        return plan[state["task_type"]].pop(0), 0.9, {}
+
+    r.router_ask_override = fake_jev
+    answers = {"ask": False}
+    r.event.connect(lambda raw: (lambda e: r.confirmReply(e["id"], answers["ask"])
+                                 if e["kind"] == "ask" else None)(json.loads(raw)))
+
+    def run(fn, *a):
+        n = len(kinds("busy"))
+        fn(*a)
+        wait(lambda: len(kinds("busy")) > n, 5)
+        return wait(lambda: not r.busy, 120)
+
+    run(r.generate, json.dumps({"text": "un pingouin cowboy", "name": "pingouin"}))
+    logs = [e["text"] for e in kinds("log")]
+    check("1re génération : routeur consulté, commande lancée",
+          seen[0] == ("generation", False) and any(t.startswith("$ cp") for t in logs))
+    cache = json.loads((r.settings.workspace_path / ".generations.json").read_text())
+    check("génération mise en cache", len(cache) == 1 and list(cache.values())[0]["successes"] == 1)
+
+    events.clear()
+    run(r.generate, json.dumps({"text": "Un pingouin cowboy "}))
+    logs = [e["text"] for e in kinds("log")]
+    check("2e génération identique : le routeur voit le cache", seen[1] == ("generation", True))
+    check("« réutiliser » → pas de nouvelle génération",
+          not any(t.startswith("$ cp") for t in logs) and any("réutilise" in t for t in toasts()))
+
+    run(r.exportModel, "glb")                       # 1er export : rien à décider
+    events.clear()
+    run(r.exportModel, "glb")                       # 2e export, rien n'a changé
+    check("export inchangé : le routeur le voit à jour", seen[2] == ("rerun_step", True))
+    check("« réutiliser » → export sauté", any("déjà à jour" in t for t in toasts()))
+
+    run(r.rig)                                      # 1er squelette
+    events.clear()
+    run(r.rig)                                      # refaire ? le routeur demande → on répond non
+    check("« te demander » → fenêtre oui/non", len(kinds("ask")) == 1)
+    log = (r.project.folder / "decisions.jsonl").read_text()
+    check("refus noté pour le rapport", '"actual": "ask_human"' in log)
+    report = r.routerReport()
+    check("rapport du routeur écrit", "Décisions" in report
+          and (r.settings.workspace_path / "rapport-routeur.md").exists())
     print("Tout est bon.")
 
 

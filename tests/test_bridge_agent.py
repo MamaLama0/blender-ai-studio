@@ -29,7 +29,7 @@ results = {}
 def scripted(responses):
     """Remplace l'appel à Claude par une suite de réponses écrites à l'avance."""
     it = iter(responses)
-    return lambda: next(it)
+    return lambda **kw: next(it)
 
 
 def tool(name, inp, tid):
@@ -111,7 +111,7 @@ def client_side(tmp):
                          "tool_calls": [{"function": {"name": "get_scene_info", "arguments": {}}}]}},
             {"message": {"role": "assistant", "content": "Il y a un personnage et son squelette."}},
         ])
-        agent._ollama_call = lambda: next(it)
+        agent._ollama_call = lambda **kw: next(it)
         agent.ask("Qu'y a-t-il dans la scène ?")
         assert events[-1]["text"].startswith("Il y a"), events
         assert any(e["kind"] == "tool_result" and "Character_Rig" in e["text"] for e in events)

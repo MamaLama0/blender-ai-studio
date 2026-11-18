@@ -35,6 +35,7 @@
     </div>
 
     <div class="topbar-right">
+      <button class="router-chip" id="routerChip" hidden title="Routeur de décision : réglages et rapport"></button>
       <span class="status" id="gpuStatus" title=""></span>
       <button class="status status-btn" id="blenderStatus" title="Ouvrir Blender avec le pont">
         <i class="dot"></i><span>Blender</span>
@@ -258,6 +259,44 @@
 
       <section>
         <div class="section-head">
+          <h3>Routeur de décision</h3>
+          <button type="button" class="btn small ghost test" data-test="router">Tester</button>
+        </div>
+        <p class="test-result" data-result="router" hidden></p>
+        <p class="hint">Avant un geste coûteux ou risqué (réessayer après une erreur, exécuter du code, relancer une génération, refaire une étape), l'app demande à un petit modèle de choisir : continuer, réutiliser l'existant, arrêter de réessayer, limiter l'effort ou te demander.</p>
+        <label class="field"><span>Modèle de décision</span>
+          <select name="router_provider">
+            <option value="none">Aucun : garde-fous en dur seulement</option>
+            <option value="jev">Jev (TypeSafe)</option>
+            <option value="claude">Équivalent : Claude Haiku</option>
+            <option value="ollama">Équivalent local : Ollama</option>
+          </select></label>
+        <div class="when" data-when="router_provider!=none">
+          <div class="seg" role="radiogroup" aria-label="Mode du routeur">
+            <label><input type="radio" name="router_mode" value="shadow"><span>Observation</span></label>
+            <label><input type="radio" name="router_mode" value="active"><span>Actif</span></label>
+          </div>
+          <p class="hint">Observation : le routeur donne son avis, l'app le note sans changer de comportement, et le rapport compare. Passe en actif quand ses avis te conviennent.</p>
+          <label class="field"><span>Confiance minimale pour appliquer <output id="confOut">55 %</output></span>
+            <input type="range" name="router_min_confidence" min="0.3" max="0.95" step="0.05"></label>
+        </div>
+        <div class="when" data-when="router_provider=jev">
+          <p class="hint warn" id="sdkWarn" hidden>Le SDK de Jev n'est pas installé : relance ./install.sh, ou pip install typesafe-sdk.</p>
+          <label class="field"><span>Clé API TypeSafe <small id="tsKeyState"></small></span>
+            <input type="password" name="typesafe_key" autocomplete="off" placeholder="clé TypeSafe"></label>
+          <label class="field"><span>Modèle Jev</span><input name="router_jev_model"></label>
+        </div>
+        <div class="when" data-when="router_provider=claude">
+          <label class="field"><span>Modèle (utilise ta clé Claude ci-dessus)</span><input name="router_claude_model"></label>
+        </div>
+        <div class="when" data-when="router_provider=ollama">
+          <label class="field"><span>Petit modèle local (adresse d'Ollama ci-dessus)</span><input name="router_ollama_model"></label>
+        </div>
+        <button type="button" class="btn small ghost" id="reportBtn">Voir le rapport du routeur</button>
+      </section>
+
+      <section>
+        <div class="section-head">
           <h3>Génération 3D</h3>
           <button type="button" class="btn small ghost test" data-test="generator">Tester</button>
         </div>
@@ -317,6 +356,26 @@
       <div class="modal-actions">
         <button value="cancel" class="btn ghost">Fermer</button>
       </div>
+    </form>
+  </dialog>
+
+  <!-- Question du routeur (oui / non) -->
+  <dialog class="modal ask" id="askDialog">
+    <form method="dialog">
+      <h2 id="askTitle"></h2>
+      <p id="askText"></p>
+      <div class="modal-actions">
+        <button value="no" class="btn ghost" id="askNo">Non</button>
+        <button value="yes" class="btn primary" id="askYes">Oui</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Rapport du routeur -->
+  <dialog class="modal report" id="reportDialog">
+    <form method="dialog">
+      <div class="report-body" id="reportBody"></div>
+      <div class="modal-actions"><button value="close" class="btn primary" autofocus>Fermer</button></div>
     </form>
   </dialog>
 
@@ -381,6 +440,7 @@
     <symbol id="i-spin" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><ellipse cx="12" cy="15" rx="8" ry="3.5"/><path d="M17 9.5l3 1.5-1 3"/><path d="M12 4v7"/></g></symbol>
     <symbol id="i-camera" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></g></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></g></symbol>
+    <symbol id="i-route" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><path d="M7 12h4l3-5h5M14 12h5M11 12l3 5h5"/></g></symbol>
     <symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"/></symbol>
   </svg>
 

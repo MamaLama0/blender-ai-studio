@@ -48,13 +48,23 @@ class Settings:
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3:14b"
 
-    # Garde-fous de l'agent (repris de l'idée du « routeur » de l'article)
+    # Garde-fous en dur (toujours actifs, même avec le routeur : filet de sécurité)
     confirm_code: bool = True       # demander avant d'exécuter du code dans Blender
     max_steps: int = 12             # nombre max d'actions par demande
     max_same_error: int = 2         # même erreur N fois → on arrête et on te demande
 
-    # Génération 3D
-    generator: str = "trellis"        # trellis | hunyuan_local | custom_command | import_only
+    # Routeur de décision (article « How To Wire Jev Into Grok Bot ») : un petit modèle
+    # consulté avant les gestes coûteux ou risqués, qui répond par une action typée.
+    router_provider: str = "none"   # none | jev | claude | ollama
+    router_mode: str = "shadow"     # shadow (observe et note) | active (décide)
+    router_jev_model: str = "jev-latest"
+    router_claude_model: str = "claude-haiku-5-5"
+    router_ollama_model: str = "qwen3:4b"
+    router_min_confidence: float = 0.55   # en dessous, on n'applique pas la décision
+    router_timeout: float = 10.0
+
+    # Génération 3D : désactivée par défaut, activée seulement si la machine le permet
+    generator: str = "import_only"    # trellis | hunyuan_local | custom_command | import_only
     trellis_repo: str = str(Path.home() / "TRELLIS")
     trellis_python: str = str(Path.home() / "miniconda3/envs/trellis/bin/python")
     hunyuan_url: str = "http://127.0.0.1:8080"
@@ -65,8 +75,9 @@ class Settings:
     target_faces: int = 20000
     workspace: str = str(Path.home() / "BlenderAIStudio")
 
-    # Clé API en clair uniquement si keyring est indisponible
+    # Clés en clair uniquement si keyring est indisponible
     _fallback_api_key: str = ""
+    _fallback_typesafe_key: str = ""
 
     @classmethod
     def load(cls) -> "Settings":
@@ -74,7 +85,9 @@ class Settings:
             try:
                 data = json.loads(CONFIG_FILE.read_text())
                 known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-                return cls(**known)
+                loaded = cls(**known)
+                loaded._existed = True
+                return loaded
             except (json.JSONDecodeError, TypeError):
                 pass
         return cls()
@@ -84,32 +97,46 @@ class Settings:
         CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False))
         os.chmod(CONFIG_FILE, 0o600)
 
-    # --- clé API -----------------------------------------------------------
-    def get_api_key(self) -> str:
-        env = os.environ.get("ANTHROPIC_API_KEY")
-        if env:
-            return env
+    _existed = False  # le fichier de réglages existait-il déjà ? (premier lancement sinon)
+
+    # --- clés API ----------------------------------------------------------
+    _SECRETS = {
+        "anthropic": ("ANTHROPIC_API_KEY", "_fallback_api_key"),
+        "typesafe": ("TYPESAFE_API_KEY", "_fallback_typesafe_key"),
+    }
+
+    def get_secret(self, name: str) -> str:
+        env_name, fallback = self._SECRETS[name]
+        if os.environ.get(env_name):
+            return os.environ[env_name]
         try:
             import keyring
 
-            value = keyring.get_password(KEYRING_SERVICE, "anthropic")
+            value = keyring.get_password(KEYRING_SERVICE, name)
             if value:
                 return value
         except Exception:
             pass
-        return self._fallback_api_key
+        return getattr(self, fallback)
 
-    def set_api_key(self, key: str) -> str:
-        """Enregistre la clé. Renvoie où elle a été rangée."""
+    def set_secret(self, name: str, key: str) -> str:
+        """Enregistre une clé. Renvoie où elle a été rangée."""
+        _, fallback = self._SECRETS[name]
         try:
             import keyring
 
-            keyring.set_password(KEYRING_SERVICE, "anthropic", key)
-            self._fallback_api_key = ""
+            keyring.set_password(KEYRING_SERVICE, name, key)
+            setattr(self, fallback, "")
             return "trousseau système"
         except Exception:
-            self._fallback_api_key = key
+            setattr(self, fallback, key)
             return "fichier de config (droits 600)"
+
+    def get_api_key(self) -> str:
+        return self.get_secret("anthropic")
+
+    def set_api_key(self, key: str) -> str:
+        return self.set_secret("anthropic", key)
 
     @property
     def workspace_path(self) -> Path:

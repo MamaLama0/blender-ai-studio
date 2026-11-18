@@ -2,7 +2,9 @@
 
 Une application de bureau Linux pour fabriquer un personnage 3D animé sans connaître Blender :
 une image ou une description → un modèle 3D → nettoyé → squeletté → animé → exporté.
-Une IA (Claude ou un modèle local) pilote Blender pour tout le reste, en langage naturel.
+Une IA (Claude ou un modèle local) pilote Blender pour tout le reste, en langage naturel,
+encadrée par un **routeur de décision** : Jev de TypeSafe, ou un équivalent, comme dans l'article
+[How To Wire Jev Into Grok Bot](https://zodchiii.substack.com/p/how-to-wire-jev-into-grok-bot-the).
 
 ![Aperçu de l'application](docs/apercu.png)
 
@@ -10,12 +12,13 @@ Une IA (Claude ou un modèle local) pilote Blender pour tout le reste, en langag
 
 | Étape | Comment |
 |---|---|
-| **1. Créer** | Image ou texte → modèle 3D avec TRELLIS (Microsoft, MIT) ou Hunyuan3D-2, sur ta carte graphique. Ou import d'un `.glb/.gltf/.obj/.fbx/.stl/.ply`. |
+| **1. Créer** | Import d'un `.glb/.gltf/.obj/.fbx/.stl/.ply`. En option, si ta carte graphique le permet : image ou texte → modèle 3D avec TRELLIS (Microsoft, MIT). |
 | **2. Alléger** | Fusion des sommets en double, faces cassées, normales, réduction au nombre de faces voulu, pieds au sol, hauteur 1 m. |
 | **3. Squelette** | Auto-rig : hanches, colonne, tête, bras et jambes placés d'après la forme, puis poids automatiques (repli par proximité si le maillage IA n'est pas étanche). |
 | **4. Animer** | Respiration, marche dandinée, saut, coucou : animations procédurales en boucle, rangées en pistes NLA. |
 | **5. Exporter** | GLB (web, Godot, three.js) avec une page web prête à publier, FBX (Unity, Unreal : une « take » par animation), OBJ. |
 | **Assistant** | « Ajoute un chapeau de cowboy », « fais-lui une danse » : l'IA lit la scène et exécute du Python dans Blender, avec ta validation. |
+| **Routeur** | Avant chaque geste coûteux ou risqué, un petit modèle (Jev ou équivalent) choisit : continuer, réutiliser l'existant, arrêter de réessayer, limiter l'effort, ou te demander. |
 
 L'aperçu 3D (three.js) se met à jour après chaque étape et lit toutes les animations.
 
@@ -65,18 +68,28 @@ Désinstaller : `./uninstall.sh` (tes projets et réglages sont conservés).
 1. **Réglages** (roue en haut à droite) → choisis l'IA :
    - **Claude** : colle ta clé API Anthropic (rangée dans le trousseau GNOME/KDE, pas en clair).
    - **Ollama** : `ollama pull qwen3:14b` puis `ollama serve`. Le modèle doit savoir appeler des outils.
-2. **Génération 3D** : le bandeau t'indique ce que ta carte graphique permet (voir plus bas).
-3. Clique **Ouvrir dans Blender** pour que l'assistant puisse travailler. Sans Blender ouvert,
+2. **Routeur de décision** (optionnel) : Jev avec ta clé TypeSafe, ou Claude Haiku, ou Ollama.
+   Commence en mode **Observation** (voir plus bas).
+3. **Génération 3D** (optionnelle) : le bandeau t'indique ce que ta carte graphique permet.
+4. Clique **Ouvrir dans Blender** pour que l'assistant puisse travailler. Sans Blender ouvert,
    les étapes 1 à 5 tournent quand même dans un Blender invisible en arrière-plan.
 
-## Génération 3D : quel moteur ?
+## Génération 3D (optionnelle) : pourquoi, et quel moteur ?
+
+**Décision** : la génération image → 3D est gardée, mais **coupée par défaut**. Elle n'est utile
+que comme point de départ (un dessin → un premier modèle), elle demande une carte NVIDIA de 16 Go
+et une installation lourde, et ses maillages sont imparfaits : c'est pour ça que l'étape
+« Alléger » les nettoie. Au premier lancement, l'app l'active seule si TRELLIS est installé et que
+la carte a assez de mémoire. Sinon, tu importes un modèle fait ailleurs, et tout le reste marche.
+Les générations sont mises en cache : le routeur peut alors choisir de réutiliser un modèle
+déjà généré pour la même image, au lieu de relancer plusieurs minutes de calcul.
 
 | Moteur | Licence | Matériel | Remarque |
 |---|---|---|---|
-| **TRELLIS** (défaut) | MIT | NVIDIA ≥ 16 Go | Image ou texte. |
+| **TRELLIS** (conseillé) | MIT | NVIDIA ≥ 16 Go | Image ou texte. |
 | **Hunyuan3D-2** | Tencent Hunyuan | NVIDIA 6 Go (mini) à 12-16 Go (avec texture) | ⚠ **La licence exclut l'Union européenne, le Royaume-Uni et la Corée du Sud.** |
 | **Ta commande** | — | — | N'importe quel script qui accepte `{image}`, `{text}`, `{output}`. |
-| **Aucun** | — | — | Tu importes des modèles faits ailleurs. |
+| **Aucun** (défaut) | — | — | Tu importes des modèles faits ailleurs. |
 
 Sans carte NVIDIA (AMD, Intel, portable), utilise « Aucun » ou un serveur distant :
 le nettoyage, le rig, l'animation et l'export marchent sur n'importe quelle machine.
@@ -95,17 +108,63 @@ L'appli appelle `blender_ai_studio/servers/trellis_generate.py` avec ce Python.
 **Hunyuan3D-2** (hors UE) : dans le dépôt Tencent, `python api_server.py --port 8080 --enable_tex`,
 puis choisis « Hunyuan3D-2 » dans Réglages.
 
-## Les garde-fous de l'assistant
+## Le routeur de décision (Jev ou équivalent)
 
-L'idée vient d'un article sur un « routeur » qui décide, avant chaque action d'un agent, s'il faut
-continuer, arrêter de réessayer ou demander à un humain. Ici c'est appliqué dans le code, pas
-seulement suggéré au modèle :
+C'est l'idée centrale de l'article : avant un geste coûteux ou risqué, l'agent ne décide pas seul.
+Il pose **une** question à un petit modèle de décision, qui répond par une action typée (pas de
+prose), avec une confiance :
 
-- **Validation** : chaque bout de code Python est montré avant de tourner dans Blender (désactivable).
-- **Stop aux boucles** : la même erreur deux fois → l'IA s'arrête et te demande comment continuer.
-- **Budget** : 12 actions maximum par demande (réglable).
-- **Journal** : chaque décision est écrite dans `decisions.jsonl` dans le dossier du projet.
-- **Bouton Arrêter** pendant que l'IA travaille.
+| Action | Ce que fait l'app (mode actif) |
+|---|---|
+| `proceed` · continuer | Rien ne change. |
+| `reuse_cache` · réutiliser l'existant | Réutilise un modèle déjà généré, saute un export ou une étape déjà à jour, ou dit à l'IA que le résultat existe déjà. |
+| `stop_retry` · arrêter de réessayer | Le code n'est pas exécuté, l'IA ne réessaie pas, et elle explique ce qui bloque. |
+| `research_capped` · limiter l'effort | L'IA doit conclure tout de suite. Une génération passe en version rapide (sans texture). |
+| `ask_human` · te demander | Une fenêtre oui/non s'ouvre. **Jamais contourné**, quelle que soit la confiance. |
+
+**Quand il est consulté** (l'équivalent, dans l'app, des moments de l'article : avant une session
+de navigation, une recherche, un réessai ou un bot supplémentaire) :
+
+- avant d'**exécuter du code** dans Blender ;
+- **après une erreur**, avant de laisser l'IA réessayer ;
+- **à mi-parcours** d'une longue série d'actions ;
+- avant de **générer** un modèle 3D (des minutes de GPU) ;
+- avant de **refaire une étape** déjà faite, ou qui a déjà échoué.
+
+**Ce qui lui est envoyé** : les quatre champs de l'article (`goal`, `task_type`, `last_error`,
+`repeats`) et un petit contexte (étapes utilisées, résultat en cache ou non). Jamais ta clé ni
+tes fichiers. Mais `goal` reprend ta demande, et `last_error` le message d'erreur : c'est du texte
+qui part chez le fournisseur choisi (TypeSafe, Anthropic, ou ton Ollama local).
+
+**Fournisseurs** (Réglages → Routeur de décision) :
+
+- **Jev (TypeSafe)** : le modèle de l'article. `typesafe-sdk` est installé par `install.sh`, et ta clé
+  `TYPESAFE_API_KEY` va dans le trousseau. Appel :
+  `TypeSafeClient(model="jev-latest").system_one(state, {"action": Choice(...)})`.
+- **Claude Haiku** : même question, réponse forcée par un outil `decide`. Ça utilise ta clé Claude.
+- **Ollama** : même question en local, réponse contrainte par un schéma JSON (`qwen3:4b` par défaut).
+
+**Les deux modes de l'article** :
+
+1. **Observation** (par défaut) : le routeur est consulté et sa décision notée, mais l'app ne
+   change rien. Pour chaque décision, elle note aussi ce qu'elle a vraiment fait.
+   **Voir le rapport du routeur** compare les deux : actions recommandées, confiance moyenne,
+   temps de réponse, et désaccords (« le routeur aurait arrêté, l'app a réessayé »). Le rapport
+   est aussi écrit dans `~/BlenderAIStudio/rapport-routeur.md`.
+2. **Actif** : les décisions sont appliquées si leur confiance dépasse le seuil (55 % par défaut).
+
+**Kill switches** : choisir « Aucun » dans les réglages, ou écrire `bypass jev` (ou « sans
+routeur ») dans une demande à l'assistant. Si le routeur est en panne ou trop lent, l'app continue
+normalement et le note dans le journal.
+
+**Filet de sécurité** : les garde-fous en dur restent actifs dans tous les cas. Le routeur peut
+rendre l'app plus prudente ou plus économe, jamais lever une protection :
+
+- chaque bout de code Python t'est montré avant de tourner (désactivable) ;
+- la même erreur deux fois → arrêt ;
+- 12 actions maximum par demande ;
+- un bouton Arrêter ;
+- un journal `decisions.jsonl` par projet.
 
 ## Utiliser le pont avec Claude Desktop ou Claude Code
 
@@ -167,7 +226,8 @@ blender_ai_studio/
   app.py            fenêtre Qt + serveur HTTP local (127.0.0.1, jeton secret)
   backend.py        pont Python ↔ page web (QWebChannel)
   pipeline.py       lance les étapes dans Blender ouvert (pont) ou en arrière-plan
-  agent.py          boucle de l'IA (Claude API / Ollama) + garde-fous
+  agent.py          boucle de l'IA (Claude API / Ollama) + garde-fous + points de contrôle du routeur
+  router.py         routeur de décision : Jev (TypeSafe), Claude Haiku, Ollama ; rapport
   generators.py     TRELLIS, Hunyuan3D, commande perso
   hardware.py       détection de la carte graphique
   blender_side/     code qui tourne DANS Blender (pont, étapes du pipeline)
@@ -183,7 +243,8 @@ React (Cue, shadcn…) plus tard sans toucher au moteur Python.
 pip install bpy PySide6           # bpy = Blender en module Python
 python tests/test_pipeline_bpy.py # import → rig → 4 animations → export GLB vérifié
 python tests/test_bridge_agent.py # pont, pipeline en direct, agent Claude/Ollama et garde-fous (IA simulée)
-QT_QPA_PLATFORM=offscreen python tests/test_backend.py   # annulation, enchaînement, Tester, projets, historique
+QT_QPA_PLATFORM=offscreen python tests/test_backend.py   # annulation, enchaînement, Tester, projets, historique, routeur
+python tests/test_router.py       # routeur : appel Jev conforme à l'article (SDK simulé), Haiku, Ollama, modes, rapport
 python tests/visual_check.py /tmp/rendus penguin humanoid blob   # planches de rendu du rig
 ```
 

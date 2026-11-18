@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
 import shutil
 import subprocess
@@ -20,11 +21,13 @@ from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import QFileDialog
 
 from . import generators
+from . import router as routing
 from .agent import Agent, AgentError
 from .bridge import BlenderBridge
 from .config import CONFIG_DIR, Settings
 from .hardware import detect_gpu
 from .pipeline import Cancelled, PipelineRunner, Project, StepError
+from .router import Router
 
 MODEL_FILTER = "Modèles 3D (*.glb *.gltf *.obj *.fbx *.stl *.ply)"
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp)"
@@ -40,6 +43,13 @@ class Backend(QObject):
         self.file_server = file_server
         self.window = window
         self.gpu = detect_gpu()
+        # Image → 3D seulement si la machine le permet : au premier lancement, on active
+        # TRELLIS d'office s'il est installé et que la carte a assez de mémoire (≥ 16 Go).
+        if (not settings._existed and settings.generator == "import_only"
+                and self.gpu.vendor == "nvidia" and self.gpu.vram_gb >= 16
+                and Path(settings.trellis_python).expanduser().exists()):
+            settings.generator = "trellis"
+            settings.save()
         self.runner = PipelineRunner(settings)
         self.project: Project | None = None
         self.busy = False
@@ -169,6 +179,20 @@ class Backend(QObject):
             },
             "busy": self.busy,
             "checks": self._checks(),
+            "router": self._router_status(),
+        }
+
+    def _router_status(self) -> dict:
+        try:
+            import importlib.util
+            sdk = importlib.util.find_spec("typesafe_sdk") is not None
+        except (ImportError, ValueError):
+            sdk = False
+        return {
+            "provider": self.settings.router_provider,
+            "mode": self.settings.router_mode,
+            "has_typesafe_key": bool(self.settings.get_secret("typesafe")),
+            "sdk_installed": sdk,
         }
 
     def _save_info(self, **updates):
@@ -352,8 +376,12 @@ class Backend(QObject):
                     value = bool(value)
                 elif isinstance(current, int):
                     value = int(value)
+                elif isinstance(current, float):
+                    value = float(value)
                 setattr(trial, key, value)
-        api_key = json.loads(payload or "{}").get("api_key") or trial.get_api_key()
+        raw = json.loads(payload or "{}")
+        api_key = raw.get("api_key") or trial.get_api_key()
+        typesafe_key = raw.get("typesafe_key") or ""
 
         def work():
             try:
@@ -365,6 +393,11 @@ class Backend(QObject):
                     message = check_provider(trial, api_key)
                 elif kind == "generator":
                     message = generators.check(trial)
+                elif kind == "router":
+                    if typesafe_key:
+                        trial.get_secret = lambda name, _k=typesafe_key, _t=trial: (
+                            _k if name == "typesafe" else Settings.get_secret(_t, name))
+                    message = routing.check(trial)
                 else:
                     raise ValueError(kind)
                 self.emit("test_result", test=kind, ok=True, message=message)
@@ -409,14 +442,78 @@ class Backend(QObject):
             project = self._ensure_project(req.get("name"))
             if fresh:
                 self.emit("state", state=self._state())
+            image, text = req.get("image") or None, req.get("text") or None
+            key = self._generation_key(image, text)
+            cache = self._generation_cache()
+            entry = cache.get(key, {})
+            cached = entry.get("path") if entry.get("path") and Path(entry["path"]).is_file() else None
+
+            # Point de contrôle du routeur : une génération coûte des minutes de GPU
+            what = f"l'image {Path(image).name}" if image else f"la description « {text[:80]} »"
+            decision = self._router().route(
+                f"Générer un modèle 3D depuis {what}", "generation",
+                entry.get("error", ""), entry.get("failures", 0),
+                {"engine": self.settings.generator, "cached_result_available": bool(cached),
+                 "previous_successes": entry.get("successes", 0)})
+            applied = decision.applied
+            if applied == "reuse_cache" and cached:
+                self._router_outcome(decision, "reuse_cache")
+                self.toast("Le routeur réutilise le modèle déjà généré pour cette entrée.")
+                self._import(cached, req.get("auto"))
+                return
+            if applied == "stop_retry":
+                self._router_outcome(decision, "stop_retry")
+                raise StepError("Le routeur conseille de ne pas relancer cette génération : "
+                                + (entry.get("error") or "elle a déjà échoué."))
+            if applied == "ask_human" and not self._ask(
+                    "Relancer la génération ?",
+                    "Le routeur préfère te demander : générer prend plusieurs minutes de carte graphique."
+                    + (" Un modèle existe déjà pour cette entrée." if cached else ""),
+                    "Générer", "Annuler"):
+                self._router_outcome(decision, "ask_human", "génération refusée")
+                raise Cancelled("Génération annulée.")
+            settings = self.settings
+            if applied == "research_capped":
+                settings = copy.deepcopy(self.settings)   # version rapide : sans texture
+                settings.hunyuan_texture = False
+                self.log("Routeur : génération rapide (sans texture).")
+            self._router_outcome(decision, "proceed")
+
             out = project.folder / "sources" / f"genere-{time.strftime('%H%M%S')}.glb"
             out.parent.mkdir(parents=True, exist_ok=True)
             self.log("Génération du modèle 3D…")
-            generators.generate(self.settings, out, image=req.get("image") or None,
-                                text=req.get("text") or None, log=self.log, cancel=self.cancel_event)
+            try:
+                generators.generate(settings, out, image=image, text=text, log=self.log,
+                                    cancel=self.cancel_event)
+            except generators.GenerationError as exc:
+                if not self.cancel_event.is_set():
+                    entry.update(error=str(exc)[:300], failures=entry.get("failures", 0) + 1)
+                    cache[key] = entry
+                    self._save_generation_cache(cache)
+                raise
+            entry.update(path=str(out), successes=entry.get("successes", 0) + 1, error="", failures=0)
+            cache[key] = entry
+            self._save_generation_cache(cache)
             self._import(str(out), req.get("auto"))
 
         self._job("Génération 3D", work)
+
+    # --- cache des générations (pour que « réutiliser l'existant » ait un sens) ---
+    def _generation_key(self, image: str | None, text: str | None) -> str:
+        h = hashlib.sha256(self.settings.generator.encode())
+        if image and Path(image).is_file():
+            h.update(Path(image).read_bytes())
+        h.update((text or "").strip().lower().encode())
+        return h.hexdigest()[:24]
+
+    def _generation_cache(self) -> dict:
+        try:
+            return json.loads((self.settings.workspace_path / ".generations.json").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _save_generation_cache(self, cache: dict):
+        (self.settings.workspace_path / ".generations.json").write_text(json.dumps(cache, indent=1))
 
     def _import(self, path: str, auto: dict | None = None):
         if not Path(path).is_file():
@@ -451,9 +548,64 @@ class Backend(QObject):
     def importModelAuto(self, path: str, auto: str):
         self._job("Import et nettoyage", self._import, path, json.loads(auto))
 
+    def _info(self) -> dict:
+        path = self.project.folder / "etat.json" if self.project else None
+        return json.loads(path.read_text()) if path and path.exists() else {}
+
+    def _route_rerun(self, step: str, label: str, already_done: bool) -> bool:
+        """Avant de refaire une étape déjà faite (ou qui a déjà échoué) : le routeur décide.
+        Renvoie True si on lance l'étape."""
+        info = self._info()
+        failure = (info.get("failures") or {}).get(step, {})
+        if not already_done and not failure:
+            return True  # rien à décider : première fois
+        decision = self._router().route(
+            f"{label} ({self.project.folder.name})", "rerun_step",
+            failure.get("error", ""), failure.get("count", 0),
+            {"step": step, "cached_result_available": already_done, "result_unchanged_since": already_done})
+        applied = decision.applied
+        if applied == "reuse_cache" and already_done:
+            self._router_outcome(decision, "reuse_cache")
+            self.toast(f"{label} : déjà à jour, le routeur n'a rien refait.")
+            return False
+        if applied == "stop_retry" and failure:
+            self._router_outcome(decision, "stop_retry")
+            self.toast(f"{label} : le routeur conseille de ne pas relancer ({failure.get('error', '')[:120]}).",
+                       "warn")
+            return False
+        if applied == "ask_human" and not self._ask(
+                f"{label} : refaire ?", "Le routeur préfère te demander avant de refaire cette étape.",
+                "Refaire", "Laisser tel quel"):
+            self._router_outcome(decision, "ask_human", "refus")
+            return False
+        self._router_outcome(decision, "proceed")
+        return True
+
+    def _step_tracked(self, step: str, args: dict | None = None) -> dict:
+        """Lance une étape en notant ses échecs (le routeur s'en sert pour « arrêter de réessayer »)."""
+        try:
+            res = self._step(step, args)
+        except Cancelled:
+            raise
+        except StepError as exc:
+            info = self._info()
+            failures = info.get("failures") or {}
+            previous = failures.get(step, {})
+            failures[step] = {"error": str(exc)[:300], "count": previous.get("count", 0) + 1}
+            self._save_info(failures=failures)
+            raise
+        failures = self._info().get("failures") or {}
+        if step in failures:
+            failures.pop(step)
+            self._save_info(failures=failures)
+        return res
+
     def _do_rig(self, quiet=False):
-        res = self._step("rig")
-        self._save_info(rig=res)
+        if not self._route_rerun("rig", "Squelette", bool(self._info().get("rig"))):
+            return
+        res = self._step_tracked("rig")
+        # Un nouveau squelette remplace l'ancien : ses animations et l'export sont à refaire
+        self._save_info(rig=res, animations=[], anim_params=None, last_export=None)
         if not quiet:
             self.toast(f"Squelette posé ({len(res['bones'])} os, poids {res['skinning']})")
 
@@ -462,8 +614,13 @@ class Backend(QObject):
         self._job("Pose du squelette", self._do_rig)
 
     def _do_animate(self, kinds, intensity, quiet=False):
-        res = self._step("animate", {"kinds": kinds, "intensity": intensity})
-        self._save_info(animations=res["animations"])
+        info = self._info()
+        params = {"kinds": sorted(kinds), "intensity": round(float(intensity), 2)}
+        same = bool(info.get("animations")) and info.get("anim_params") == params
+        if not self._route_rerun("animate", "Animations", same):
+            return
+        res = self._step_tracked("animate", {"kinds": kinds, "intensity": intensity})
+        self._save_info(animations=res["animations"], anim_params=params, last_export=None)
         if not quiet:
             self.toast("Animations : " + ", ".join(res["animations"]))
 
@@ -477,8 +634,17 @@ class Backend(QObject):
         project = self._ensure_project()
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in project.folder.name)
         path = project.exports / f"{safe.strip('-') or 'perso'}.{fmt}"
-        res = self._step("export", {"path": str(path), "fmt": fmt})
-        self._save_info(last_export=res["path"])
+        info = self._info()
+        # À jour = même fichier exporté, et le .blend n'a pas bougé depuis cet export
+        up_to_date = (path.exists() and project.blend.exists()
+                      and info.get("last_export") == str(path)
+                      and info.get("export_blend_mtime") == project.blend.stat().st_mtime)
+        if not self._route_rerun("export", f"Export {fmt.upper()}", up_to_date):
+            self.emit("exported", path=str(path))
+            return
+        res = self._step_tracked("export", {"path": str(path), "fmt": fmt})
+        self._save_info(last_export=res["path"],
+                        export_blend_mtime=project.blend.stat().st_mtime if project.blend.exists() else None)
         if fmt == "glb":
             self._write_web_page(project, path)
         if not quiet:
@@ -541,6 +707,7 @@ class Backend(QObject):
     def saveSettings(self, payload: str) -> str:
         data = json.loads(payload)
         api_key = data.pop("api_key", "")
+        typesafe_key = data.pop("typesafe_key", "")
         for key, value in data.items():
             if key in self.settings.__dataclass_fields__ and not key.startswith("_"):
                 current = getattr(self.settings, key)
@@ -548,10 +715,14 @@ class Backend(QObject):
                     value = bool(value)
                 elif isinstance(current, int):
                     value = int(value)
+                elif isinstance(current, float):
+                    value = float(value)
                 setattr(self.settings, key, value)
         where = ""
         if api_key:
             where = self.settings.set_api_key(api_key.strip())
+        if typesafe_key:
+            where = self.settings.set_secret("typesafe", typesafe_key.strip())
         self.settings.save()
         self.runner = PipelineRunner(self.settings)
         self.agent = None
@@ -569,8 +740,47 @@ class Backend(QObject):
                 return self._step(step, args)
 
             self.agent = Agent(self.settings, on_event=self._agent_event,
-                               confirm=self._confirm, run_step=run_step, log_dir=project.folder)
+                               confirm=self._confirm, run_step=run_step, log_dir=project.folder,
+                               router=self._router(for_agent=True))
         return self.agent
+
+    def _router(self, for_agent: bool = False) -> Router:
+        folder = self.project.folder if self.project else None
+        on_event = self._agent_event if for_agent else self._router_event
+        return Router(self.settings, folder, on_event, ask=getattr(self, "router_ask_override", None))
+
+    def _router_event(self, event: dict):
+        """Décisions du routeur hors chat (génération, étapes) : journal, et une
+        notification quand elles changent ce que fait l'app."""
+        if event.get("error"):
+            self.log(f"Routeur indisponible ({event['error'][:120]}) : l'app continue normalement.", "error")
+            return
+        moment = routing.TASK_LABELS.get(event["task_type"], event["task_type"])
+        mode = "observation" if event["mode"] != "active" else "actif"
+        self.log(f"Routeur {event['provider']} ({mode}), {moment} : {event['label']} "
+                 f"({routing.pct(event['confidence'])}, {event['latency_ms']} ms)")
+        self.emit("router", **{k: v for k, v in event.items() if k != "kind"})
+
+    def _router_outcome(self, decision, actual: str, note: str = ""):
+        if self.project:
+            Router(self.settings, self.project.folder).outcome(decision, actual, note)
+
+    def _ask(self, title: str, text: str, yes: str = "Oui", no: str = "Non") -> bool:
+        """Question oui/non dans une fenêtre de l'app (attend la réponse)."""
+        cid = uuid.uuid4().hex
+        waiter = threading.Event()
+        box = {"approved": False}
+        self._confirm_waits[cid] = (waiter, box)
+        self.emit("ask", id=cid, title=title, text=text, yes=yes, no=no)
+        waiter.wait(timeout=600)
+        self._confirm_waits.pop(cid, None)
+        return box["approved"]
+
+    @Slot(result=str)
+    def routerReport(self) -> str:
+        text = routing.report(self.settings.workspace_path)
+        (self.settings.workspace_path / "rapport-routeur.md").write_text(text, encoding="utf-8")
+        return text
 
     def _agent_event(self, event: dict):
         # Les événements de l'agent ont leur propre « kind » (assistant, tool…) : on le

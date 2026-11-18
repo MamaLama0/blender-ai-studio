@@ -57,6 +57,8 @@ function handle(ev) {
     case "project_changed": resetWorkspaceView(); break;
     case "step_done": onStepDone(ev.step); break;
     case "test_result": showTestResult(ev); break;
+    case "ask": showAsk(ev); break;
+    case "router": break; // déjà dans le journal (et en notification quand ça change quelque chose)
   }
 }
 
@@ -136,6 +138,7 @@ function applyState(s) {
     openStep(todo ? todo[0] : "export");
   }
 
+  renderRouterChip(s.router);
   renderChecklist(s.checks);
   $("#composerHint").textContent = s.blender_live ? "" : "Blender fermé : l'IA ne peut pas agir.";
 
@@ -171,6 +174,71 @@ function onStepDone(step) {
   const next = { import: "rig", rig: "animate", animate: "export" }[step];
   if (next) openStep(next);
 }
+
+// ------------------------------------------------------------------ routeur de décision
+const ROUTER_NAMES = { jev: "Jev", claude: "Claude Haiku", ollama: "Ollama" };
+const ROUTE_LABELS = {
+  proceed: "continuer", reuse_cache: "réutiliser l'existant", stop_retry: "arrêter de réessayer",
+  research_capped: "limiter l'effort", ask_human: "te demander",
+};
+const MOMENTS = {
+  retry: "après une erreur", code: "avant d'exécuter du code", generation: "avant de générer",
+  rerun_step: "avant de refaire une étape", long_run: "à mi-parcours",
+};
+
+function renderRouterChip(r) {
+  const chip = $("#routerChip");
+  if (!r || r.provider === "none") { chip.hidden = true; return; }
+  chip.hidden = false;
+  chip.classList.toggle("active", r.mode === "active");
+  chip.innerHTML = `<svg viewBox="0 0 24 24"><use href="#i-route"/></svg><span></span>`;
+  $("span", chip).textContent = `${ROUTER_NAMES[r.provider]}, ${r.mode === "active" ? "actif" : "observation"}`;
+}
+$("#routerChip").onclick = () => openSettings("router");
+
+/** Une décision du routeur dans le fil de l'assistant. */
+function routerRow(ev) {
+  // « continuer » = ce que l'app fait déjà : inutile d'encombrer le fil (c'est dans le rapport)
+  if (!ev.error && ev.action === "proceed") return;
+  const div = addMsg("router", "");
+  const name = ROUTER_NAMES[ev.provider] || ev.provider;
+  div.innerHTML = '<svg viewBox="0 0 24 24"><use href="#i-route"/></svg><span></span>';
+  const span = $("span", div);
+  if (ev.error) {
+    span.textContent = fr(`Routeur ${name} indisponible ${MOMENTS[ev.task_type] || ""} : je continue normalement.`);
+    return;
+  }
+  const label = ROUTE_LABELS[ev.action] || ev.action;
+  const pct = `${Math.round(ev.confidence * 100)} %`;
+  const moment = MOMENTS[ev.task_type] || ev.task_type;
+  if (ev.mode !== "active") {
+    span.innerHTML = `Routeur ${name}, observation, ${moment} : aurait choisi <b></b> (${pct})`;
+  } else if (ev.applied !== "proceed") {
+    div.classList.add("changed");
+    span.innerHTML = `Routeur ${name}, ${moment} : <b></b> (${pct})`;
+  } else {
+    span.innerHTML = `Routeur ${name}, ${moment} : <b></b> (${pct})${ev.action !== "proceed" ? ", pas assez sûr pour l'appliquer" : ""}`;
+  }
+  $("b", span).textContent = label;
+}
+
+function showAsk(ev) {
+  const dlg = $("#askDialog");
+  $("#askTitle").textContent = fr(ev.title);
+  $("#askText").textContent = fr(ev.text);
+  $("#askYes").textContent = ev.yes;
+  $("#askNo").textContent = ev.no;
+  dlg.onclose = () => backend.confirmReply(ev.id, dlg.returnValue === "yes");
+  dlg.returnValue = "";
+  dlg.showModal();
+  $("#askYes").focus();
+}
+
+$("#reportBtn").onclick = async () => {
+  const text = await call("routerReport");
+  $("#reportBody").innerHTML = markdown(text);
+  $("#reportDialog").showModal();
+};
 
 // ------------------------------------------------------------------ check-list de démarrage
 function renderChecklist(checks) {
@@ -547,10 +615,20 @@ function markdown(text) {
     }
     let html = escapeHtml(part)
       .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+      .replace(/^(#{1,3}) (.+)$/gm, (m, h, t) => `\n<h${h.length}>${t}</h${h.length}>\n`);
+    // Tableaux markdown (le rapport du routeur en contient)
+    html = html.replace(/(?:^|\n)((?:\|.*\|[ \t]*(?:\n|$))+)/g, (m, block) => {
+      const rows = block.trim().split("\n").filter((r) => !/^\|[\s|:-]+\|$/.test(r.trim()));
+      const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      const [head, ...body] = rows;
+      return `\n<table class="md-table"><thead><tr>${cells(head).map((c) => `<th>${c}</th>`).join("")}</tr></thead>`
+        + `<tbody>${body.map((r) => `<tr>${cells(r).map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>\n`;
+    });
     html = html.replace(/(?:^|\n)((?:[-*] .*(?:\n|$))+)/g, (m, block) =>
       `\n<ul>${block.trim().split("\n").map((l) => `<li>${l.replace(/^[-*] /, "")}</li>`).join("")}</ul>\n`);
-    return html.trim().split(/\n{2,}/).map((p) => (p.startsWith("<ul>") ? p : `<p>${p.replace(/\n/g, "<br>")}</p>`)).join("");
+    return html.trim().split(/\n{2,}/).map((p) => p.trim())
+      .map((p) => (/^<(ul|h\d|table)/.test(p) ? p : `<p>${p.replace(/\n/g, "<br>")}</p>`)).join("");
   }).join("");
 }
 
@@ -575,7 +653,8 @@ const TOOL_LABELS = {
 let lastTool = null;
 
 function agentEvent(ev) {
-  if (ev.sub === "assistant") addMsg("assistant", markdown(ev.text), { html: true });
+  if (ev.sub === "router") routerRow(ev);
+  else if (ev.sub === "assistant") addMsg("assistant", markdown(ev.text), { html: true });
   else if (ev.sub === "guard") addMsg("guard", ev.text);
   else if (ev.sub === "tool") {
     lastTool = addMsg("tool", "");
@@ -717,7 +796,7 @@ function toast(text, level = "info", action = null) {
 const dlg = $("#settingsDialog");
 const form = $("#settingsForm");
 
-function openSettings() {
+function openSettings(focus) {
   if (!state) return;
   const st = state.settings;
   for (const el of form.elements) {
@@ -727,18 +806,26 @@ function openSettings() {
     else if (el.name in st) el.value = st[el.name];
   }
   form.elements.api_key.value = "";
+  form.elements.typesafe_key.value = "";
   $("#keyState").textContent = state.has_api_key ? "(déjà enregistrée)" : "(manquante)";
+  $("#tsKeyState").textContent = state.router.has_typesafe_key ? "(déjà enregistrée)" : "(manquante)";
+  $("#sdkWarn").hidden = state.router.sdk_installed;
+  $("#confOut").textContent = `${Math.round(st.router_min_confidence * 100)} %`;
   $$(".test-result", form).forEach((r) => (r.hidden = true));
   syncWhen();
   if (!dlg.open) dlg.showModal();
+  if (focus) $(`.test[data-test="${focus}"]`, form)?.closest("section").scrollIntoView({ block: "start" });
 }
+form.elements.router_min_confidence.oninput = (e) =>
+  ($("#confOut").textContent = `${Math.round(Number(e.target.value) * 100)} %`);
 $("#settingsBtn").onclick = openSettings;
 
 function syncWhen() {
   const data = new FormData(form);
   $$(".when", form).forEach((el) => {
-    const [k, v] = el.dataset.when.split("=");
-    el.classList.toggle("on", data.get(k) === v);
+    const negate = el.dataset.when.includes("!=");
+    const [k, v] = el.dataset.when.split(/!?=/);
+    el.classList.toggle("on", negate ? data.get(k) !== v : data.get(k) === v);
   });
 }
 form.addEventListener("change", syncWhen);
@@ -749,7 +836,7 @@ function formValues() {
     if (!el.name) continue;
     if (el.type === "radio") { if (el.checked) out[el.name] = el.value; }
     else if (el.type === "checkbox") out[el.name] = el.checked;
-    else if (el.type === "number") out[el.name] = Number(el.value);
+    else if (el.type === "number" || el.type === "range") out[el.name] = Number(el.value);
     else out[el.name] = el.value;
   }
   return out;

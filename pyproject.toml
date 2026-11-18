@@ -14,6 +14,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Jev (TypeSafe), le modèle de décision de l'article ; installé par défaut par install.sh
+jev = ["typesafe-sdk>=0.7"]
 test = ["bpy"]
 
 [project.gui-scripts]

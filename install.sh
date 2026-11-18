@@ -48,6 +48,9 @@ mkdir -p "$DATA"
 "$VENV/bin/pip" install --upgrade pip --quiet
 say "Installation (PySide6 et Qt WebEngine, ~250 Mo la première fois)…"
 "$VENV/bin/pip" install --upgrade "$SRC" --quiet
+# SDK de Jev (routeur de décision) : optionnel, l'app marche sans
+"$VENV/bin/pip" install --upgrade "typesafe-sdk>=0.7" --quiet \
+  || say "SDK de Jev non installé (Python trop ancien ?) : le routeur pourra utiliser Claude Haiku ou Ollama."
 
 # --- Lanceur, icône, entrée de menu -----------------------------------------
 mkdir -p "$BIN" "$APPS" "$ICONS"
